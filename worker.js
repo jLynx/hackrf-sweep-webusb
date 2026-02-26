@@ -129,6 +129,76 @@ class Worker {
 		let iqBufferPos = 0;
 		let spectrumThrottle = 0;
 
+		// ── FIR Filter Math (SDR++ dsp/taps & dsp/window) ──────────────
+		const sinc = (x) => (x === 0.0) ? 1.0 : (Math.sin(x) / x);
+
+		const cosineWindow = (n, N, coefs) => {
+			let win = 0.0;
+			let sign = 1.0;
+			for (let i = 0; i < coefs.length; i++) {
+				win += sign * coefs[i] * Math.cos(i * 2.0 * Math.PI * n / N);
+				sign = -sign;
+			}
+			return win;
+		};
+
+		const nuttall = (n, N) => {
+			const coefs = [0.355768, 0.487396, 0.144232, 0.012604];
+			return cosineWindow(n, N, coefs);
+		};
+
+		const hzToRads = (freq, samplerate) => 2.0 * Math.PI * (freq / samplerate);
+
+		const estimateTapCount = (transWidth, samplerate) => {
+			return Math.floor(3.8 * samplerate / transWidth);
+		};
+
+		const windowedSinc = (count, cutoff, samplerate) => {
+			const taps = new Float32Array(count);
+			const omega = hzToRads(cutoff, samplerate);
+			const half = count / 2.0;
+			const corr = omega / Math.PI;
+
+			for (let i = 0; i < count; i++) {
+				const t = i - half + 0.5;
+				taps[i] = sinc(t * omega) * nuttall(t - half, count) * corr;
+			}
+
+			return taps;
+		};
+
+		class FIRFilter {
+			constructor(cutoff, transWidth, samplerate) {
+				let count = estimateTapCount(transWidth, samplerate);
+				// Even count
+				// if (count % 2 !== 0) count++;
+				this.taps = windowedSinc(count, cutoff, samplerate);
+				this.history = new Float32Array(this.taps.length);
+				this.histIdx = 0;
+			}
+
+			processOne(sample) {
+				this.history[this.histIdx] = sample;
+				let out = 0;
+				let tapIdx = 0;
+
+				// Circular buffer dot product
+				// From histIdx down to 0
+				for (let i = this.histIdx; i >= 0; i--) {
+					out += this.history[i] * this.taps[tapIdx++];
+				}
+				// From end of history buffer down to histIdx + 1
+				for (let i = this.history.length - 1; i > this.histIdx; i--) {
+					out += this.history[i] * this.taps[tapIdx++];
+				}
+
+				this.histIdx++;
+				if (this.histIdx >= this.history.length) this.histIdx = 0;
+
+				return out;
+			}
+		}
+
 		// ── Audio DDC setup ───────────────────────────────────────────
 		// Determine decimation to get close to 240 kSPS
 		const targetDemodRate = 240000;
@@ -156,9 +226,11 @@ class Worker {
 			// Audio decimation
 			audioDecimSum: 0,
 			audioDecimCount: 0,
+			// Filters state
+			wfmFir: null,
 			// De-emphasis (SDR++ style: y = alpha*x + (1-alpha)*y_prev)
 			deemphPrev: 0,
-			// Low pass FIR state (simple IIR approximation for browser)
+			// Low pass FIR state (simple IIR approximation for browser - NFM only)
 			lpPrev: 0,
 			// High pass state (for NFM)
 			hpPrev: 0,
@@ -177,6 +249,9 @@ class Worker {
 
 		const AUDIO_RATE = 48000;
 		const audioDecimation = Math.round(actualDemodRate / AUDIO_RATE);
+
+		// Initialize FIR Filter only for WFM with 15kHz cutoff, 4kHz transition bandwidth
+		state.wfmFir = new FIRFilter(15000.0, 4000.0, actualDemodRate);
 
 		await hackrf.startRx((data) => {
 			state.chunkCount++;
@@ -386,13 +461,9 @@ class Worker {
 					}
 
 					// ── WFM Low Pass Filter (SDR++ broadcast_fm.h) ───────
-					// SDR++ WFM uses 15kHz audio LPF
+					// SDR++ WFM uses exact FIR filter
 					if (mode === 'wfm' && this.audioParams.lowPass) {
-						const dt_lp = 1.0 / actualDemodRate;
-						const RC_lp = 1.0 / (2.0 * Math.PI * 15000.0);
-						const alpha_lp = dt_lp / (RC_lp + dt_lp);
-						state.lpPrev = alpha_lp * demodSample + (1 - alpha_lp) * state.lpPrev;
-						demodSample = state.lpPrev;
+						demodSample = state.wfmFir.processOne(demodSample);
 					}
 
 					state.audioDecimSum += demodSample;
