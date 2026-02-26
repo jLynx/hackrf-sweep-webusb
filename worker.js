@@ -191,13 +191,9 @@ class Worker {
 					// ~30 fps update
 					if (spectrumThrottle % 15 === 0) {
 						spectrumFft.fft(iqBuffer, spectrumOutput);
-						const reordered = new Float32Array(fftSize);
-						const half = fftSize / 2;
-						for (let j = 0; j < half; j++) {
-							reordered[j] = spectrumOutput[j + half];
-							reordered[j + half] = spectrumOutput[j];
-						}
-						spectrumCallback(reordered);
+						// `spectrumOutput` is already DC-centered by the Rust FFT implementation
+						// Copy the array because `spectrumOutput` is reused for the next frame
+						spectrumCallback(new Float32Array(spectrumOutput));
 					}
 				}
 			}
