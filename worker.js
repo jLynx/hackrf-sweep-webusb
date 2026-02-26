@@ -199,6 +199,97 @@ class Worker {
 			}
 		}
 
+		// Math greatest common divisor for rational resampling
+		const gcd = (a, b) => (b === 0 ? a : gcd(b, a % b));
+
+		class PolyphaseResampler {
+			constructor(interp, decim, taps) {
+				this.interp = interp;
+				this.decim = decim;
+				this.taps = taps;
+
+				// Build filter bank (buildPolyphaseBank from SDR++)
+				this.phaseCount = interp;
+				this.tapsPerPhase = Math.floor((taps.length + this.phaseCount - 1) / this.phaseCount);
+				this.phases = new Array(this.phaseCount);
+
+				for (let i = 0; i < this.phaseCount; i++) {
+					this.phases[i] = new Float32Array(this.tapsPerPhase);
+				}
+
+				const totTapCount = this.phaseCount * this.tapsPerPhase;
+				for (let i = 0; i < totTapCount; i++) {
+					const phaseIdx = (this.phaseCount - 1) - (i % this.phaseCount);
+					const tapIdx = Math.floor(i / this.phaseCount);
+					this.phases[phaseIdx][tapIdx] = (i < taps.length) ? taps[i] : 0.0;
+				}
+
+				this.buffer = new Float32Array(this.tapsPerPhase - 1 + 64000); // Need enough space for block
+				this.bufStartOffset = this.tapsPerPhase - 1;
+				this.phase = 0;
+				this.offset = 0;
+			}
+
+			process(input, count) {
+				const out = [];
+
+				// Copy input to buffer (shifting along in the delay line)
+				// We assume buffer handles max chunk sizes appropriately.
+				this.buffer.set(input.subarray(0, count), this.bufStartOffset);
+
+				while (this.offset < count) {
+					// Do convolution
+					let sum = 0.0;
+					const phaseTaps = this.phases[this.phase];
+					for (let i = 0; i < this.tapsPerPhase; i++) {
+						sum += this.buffer[this.offset + i] * phaseTaps[i];
+					}
+					out.push(sum);
+
+					// Increment phase
+					this.phase += this.decim;
+
+					// Branchless phase advance if phase wrap arround occurs
+					this.offset += Math.floor(this.phase / this.interp);
+
+					// Wrap around if needed
+					this.phase = this.phase % this.interp;
+				}
+				this.offset -= count;
+
+				// Move delay (memmove in c++)
+				this.buffer.copyWithin(0, count, count + this.tapsPerPhase - 1);
+
+				return new Float32Array(out);
+			}
+		}
+
+		class RationalResampler {
+			constructor(inSamplerate, outSamplerate) {
+				const IntSR = Math.round(inSamplerate);
+				const OutSR = Math.round(outSamplerate);
+				const divider = gcd(IntSR, OutSR);
+
+				this.interp = OutSR / divider;
+				this.decim = IntSR / divider;
+
+				const tapSamplerate = inSamplerate * this.interp;
+				const tapBandwidth = Math.min(inSamplerate, outSamplerate) / 2.0;
+				const tapTransWidth = tapBandwidth * 0.1;
+
+				// Generate taps and multiply by interp
+				let tapCount = estimateTapCount(tapTransWidth, tapSamplerate);
+				let taps = windowedSinc(tapCount, tapBandwidth, tapSamplerate);
+				for (let i = 0; i < taps.length; i++) taps[i] *= this.interp;
+
+				this.resamp = new PolyphaseResampler(this.interp, this.decim, taps);
+			}
+
+			process(input) {
+				return this.resamp.process(input, input.length);
+			}
+		}
+
 		// ── Audio DDC setup ───────────────────────────────────────────
 		// Determine decimation to get close to 240 kSPS
 		const targetDemodRate = 240000;
@@ -223,11 +314,9 @@ class Worker {
 			// AM demod state
 			dcAvg: 0,
 			carrierAgcGain: 1.0,
-			// Audio decimation
-			audioDecimSum: 0,
-			audioDecimCount: 0,
 			// Filters state
 			wfmFir: null,
+			audioResampler: null,
 			// De-emphasis (SDR++ style: y = alpha*x + (1-alpha)*y_prev)
 			deemphPrev: 0,
 			// Low pass FIR state (simple IIR approximation for browser - NFM only)
@@ -248,10 +337,12 @@ class Worker {
 		};
 
 		const AUDIO_RATE = 48000;
-		const audioDecimation = Math.round(actualDemodRate / AUDIO_RATE);
 
 		// Initialize FIR Filter only for WFM with 15kHz cutoff, 4kHz transition bandwidth
 		state.wfmFir = new FIRFilter(15000.0, 4000.0, actualDemodRate);
+
+		// Initialize the high-quality Polyphase Resampler for audio decimation
+		state.audioResampler = new RationalResampler(actualDemodRate, AUDIO_RATE);
 
 		await hackrf.startRx((data) => {
 			state.chunkCount++;
@@ -297,22 +388,14 @@ class Worker {
 
 				if (this.audioParams.squelchEnabled && squelchDb < this.audioParams.squelchLevel) {
 					// Muted by squelch - SDR++ zeros the entire block
-					const zeros = new Float32Array(Math.ceil(numDemodSamples / audioDecimation) + 2);
-					let zeroIdx = 0;
-					for (let i = 0; i < numDemodSamples; i++) {
-						state.audioDecimCount++;
-						if (state.audioDecimCount >= audioDecimation) {
-							zeros[zeroIdx++] = 0;
-							state.audioDecimCount = 0;
-						}
-					}
-					if (zeroIdx > 0) audioCallback(zeros.slice(0, zeroIdx));
+					// We pass zeros to the resampler to keep the delay lines matching time
+					const zeros = new Float32Array(numDemodSamples);
+					const result = state.audioResampler.process(zeros);
+					if (result.length > 0) audioCallback(result);
 					return;
 				}
 
-				const maxAudioSamples = Math.ceil(numDemodSamples / audioDecimation) + 2;
-				const audioSamples = new Float32Array(maxAudioSamples);
-				let audioIdx = 0;
+				const audioDemodRateSamples = new Float32Array(numDemodSamples);
 
 				const mode = this.audioParams.mode;
 				const bw = this.audioParams.bandwidth || 150000;
@@ -466,19 +549,13 @@ class Worker {
 						demodSample = state.wfmFir.processOne(demodSample);
 					}
 
-					state.audioDecimSum += demodSample;
-					state.audioDecimCount++;
-
-					if (state.audioDecimCount >= audioDecimation) {
-						audioSamples[audioIdx++] = state.audioDecimSum / audioDecimation;
-						state.audioDecimSum = 0;
-						state.audioDecimCount = 0;
-					}
+					audioDemodRateSamples[i] = demodSample;
 				}
 
-				if (audioIdx === 0) return;
+				// ── Audio Decimation (SDR++ RationalResampler/Polyphase) ───
+				let result = state.audioResampler.process(audioDemodRateSamples);
 
-				const result = audioSamples.slice(0, audioIdx);
+				if (result.length === 0) return;
 
 				// ── De-emphasis (SDR++ filter/deephasis.h) ────────────────
 				// Only for FM modes (NFM and WFM) per SDR++
