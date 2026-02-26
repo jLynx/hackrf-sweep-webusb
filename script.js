@@ -25,9 +25,19 @@ createApp({
 			audio: {
 				enabled: false,
 				freq: 100.0,
-				mode: 'wbfm',
+				mode: 'wfm', // SDR++ default style
+				bandwidth: 150000,
+				snapInterval: 100000,
+				deEmphasis: '50us',
+				squelchEnabled: false,
+				squelchLevel: -100.0,
+				noiseReduction: false,
+				stereo: false,
+				lowPass: true,
 				volume: 50,
 			},
+			vfoDisplayFreq: "100.000000",
+			vfoFocused: false,
 			info: { boardName: "" },
 			hoverFreqText: "",
 			view: {
@@ -50,10 +60,26 @@ createApp({
 		}
 	},
 	methods: {
+		// Replaces the template usage of formatFreq so we can use a two-way input
 		formatFreq(mhz) {
 			if (!mhz) return "000.000000";
 			let s = mhz.toFixed(6);
 			return s.padStart(10, '0');
+		},
+		focusVfoFreq() {
+			this.vfoFocused = true;
+		},
+		applyVfoFreq(e) {
+			this.vfoFocused = false;
+			let val = parseFloat(this.vfoDisplayFreq);
+			if (!isNaN(val)) {
+				this.audio.freq = val;
+				this.vfoDisplayFreq = this.formatFreq(val);
+				this.updateBackendAudioParams();
+			} else {
+				this.vfoDisplayFreq = this.formatFreq(this.audio.freq);
+			}
+			e.target.blur();
 		},
 		labelFreq(percent) {
 			const freq = this.minFreq + percent * (this.maxFreq - this.minFreq);
@@ -214,7 +240,7 @@ createApp({
 
 			// Draw VFO highlight
 			if (this.audio.freq !== null && this.audio.enabled) {
-				const bandwidthHz = this.audio.mode === 'wbfm' ? 150000 : (this.audio.mode === 'nbfm' ? 15000 : 10000);
+				const bandwidthHz = this.audio.bandwidth;
 
 				const currentSpanHz = this.radio.sampleRate / this.view.zoomScale;
 				const pixelWidth = (bandwidthHz / currentSpanHz) * w;
@@ -239,8 +265,8 @@ createApp({
 				ctx.stroke();
 			}
 		},
-		async toggleAudio() {
-			this.audio.enabled = !this.audio.enabled;
+		async toggleAudioCheckbox(e) {
+			// e.target.checked is bound to this.audio.enabled, but we need to run init logic
 			if (this.audio.enabled && !this.audioCtx) {
 				const AudioContext = window.AudioContext || window.webkitAudioContext;
 				this.audioCtx = new AudioContext({ sampleRate: 48000 });
@@ -286,7 +312,14 @@ createApp({
 				this.backend.setAudioParams({
 					freq: this.audio.freq,
 					mode: this.audio.mode,
-					enabled: this.audio.enabled
+					enabled: this.audio.enabled,
+					bandwidth: this.audio.bandwidth,
+					deEmphasis: this.audio.deEmphasis,
+					squelchEnabled: this.audio.squelchEnabled,
+					squelchLevel: this.audio.squelchLevel,
+					noiseReduction: this.audio.noiseReduction,
+					stereo: this.audio.stereo,
+					lowPass: this.audio.lowPass
 				});
 			}
 		},
@@ -375,13 +408,62 @@ createApp({
 			this.saveSetting();
 		}, { deep: true });
 
-		this.$watch('audio', () => {
+		this.$watch('audio', (newVal, oldVal) => {
 			if (this.gainNode) {
 				this.gainNode.gain.value = this.audio.volume / 100;
+			}
+			if (!this.vfoFocused) {
+				this.vfoDisplayFreq = this.formatFreq(this.audio.freq);
 			}
 			this.updateBackendAudioParams();
 			this.saveSetting();
 		}, { deep: true });
+
+		this.$watch(() => this.audio.mode, (newMode, oldMode) => {
+			if (newMode === oldMode) return; // Ignore init or identical calls
+
+			// Apply defaults for the specific mode based on SDR++
+			switch (newMode) {
+				case 'wfm':
+					this.audio.bandwidth = 150000;
+					this.audio.snapInterval = 100000;
+					this.audio.deEmphasis = '50us';
+					this.audio.stereo = false; // SDR++ UI doesn't explicitly force stereo for WFM by default, but it's an option.
+					this.audio.lowPass = true;
+					break;
+				case 'nfm':
+					this.audio.bandwidth = 12500;
+					this.audio.snapInterval = 2500;
+					this.audio.deEmphasis = 'none';
+					this.audio.stereo = false;
+					this.audio.lowPass = true;
+					break;
+				case 'am':
+					this.audio.bandwidth = 10000;
+					this.audio.snapInterval = 1000;
+					this.audio.deEmphasis = 'none';
+					this.audio.stereo = false;
+					this.audio.lowPass = true; // Typical for voice AM
+					break;
+				case 'usb':
+				case 'lsb':
+				case 'cw':
+					this.audio.bandwidth = 2800; // Actually CW usually uses tighter (e.g. 500Hz), but USB/LSB is 2800
+					if (newMode === 'cw') this.audio.bandwidth = 500;
+					this.audio.snapInterval = 100;
+					this.audio.deEmphasis = 'none';
+					this.audio.stereo = false;
+					this.audio.lowPass = false; // SDR++ SSB usually relies purely on the bandpass filter, but wait, screenshot shows lowpass off for SSB.
+					break;
+				case 'dsb':
+				case 'raw':
+					this.audio.bandwidth = 4600;
+					this.audio.snapInterval = 100;
+					this.audio.deEmphasis = 'none';
+					this.audio.stereo = false;
+					break;
+			}
+		});
 
 		this.$watch('view', () => {
 			this.applyZoomToEngine();

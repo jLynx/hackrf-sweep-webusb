@@ -14,9 +14,7 @@
 		<div class="top-bar">
 			<div class="brand">SDR WebViewer</div>
 			<div class="vfo-display">
-				<div class="vfo-freq">
-					{{ formatFreq(audio.freq) }}
-				</div>
+				<input class="vfo-freq-input" type="text" v-model="vfoDisplayFreq" @blur="applyVfoFreq" @keyup.enter="applyVfoFreq" @focus="focusVfoFreq">
 				<div class="vfo-unit">MHz</div>
 			</div>
 			<div class="top-controls">
@@ -87,29 +85,89 @@
 				</div>
 
 				<div class="panel" :class="{ disabled: !connected }">
-					<div class="panel-header">Audio VFO</div>
-					<div class="panel-body">
-						<div class="form-row">
-							<label>Status</label>
-							<button class="btn btn-listen" :class="{ active: audio.enabled }" @click="toggleAudio" :disabled="!running">
-								{{ audio.enabled ? 'Mute' : 'Listen' }}
-							</button>
+					<div class="panel-header" style="display: flex; justify-content: space-between; align-items: center;">
+						<div>Radio</div>
+						<label class="custom-checkbox header-checkbox">
+							<input type="checkbox" v-model="audio.enabled" @change="toggleAudioCheckbox" :disabled="!running">
+							<span class="checkmark"></span>
+						</label>
+					</div>
+					<div class="panel-body panel-condensed">
+						<div class="mode-grid">
+							<label class="mode-radio"><input type="radio" value="nfm" v-model="audio.mode"><span class="mode-btn">NFM</span></label>
+							<label class="mode-radio"><input type="radio" value="am" v-model="audio.mode"><span class="mode-btn">AM</span></label>
+							<label class="mode-radio"><input type="radio" value="usb" v-model="audio.mode"><span class="mode-btn">USB</span></label>
+							<label class="mode-radio"><input type="radio" value="lsb" v-model="audio.mode"><span class="mode-btn">LSB</span></label>
+							<label class="mode-radio"><input type="radio" value="wfm" v-model="audio.mode"><span class="mode-btn">WFM</span></label>
+							<label class="mode-radio"><input type="radio" value="dsb" v-model="audio.mode"><span class="mode-btn">DSB</span></label>
+							<label class="mode-radio"><input type="radio" value="cw" v-model="audio.mode"><span class="mode-btn">CW</span></label>
+							<label class="mode-radio"><input type="radio" value="raw" v-model="audio.mode"><span class="mode-btn">RAW</span></label>
 						</div>
+						
 						<div class="form-row">
-							<label>Tuned</label>
-							<div class="input-group">
-								<input type="number" v-model.number="audio.freq" step="0.001">
-								<span>MHz</span>
+							<label style="flex: 0 0 90px;">Bandwidth</label>
+							<div class="spin-group">
+								<input type="number" v-model.number="audio.bandwidth" step="1000">
+								<button @click="audio.bandwidth -= 1000">-</button>
+								<button @click="audio.bandwidth += 1000">+</button>
 							</div>
 						</div>
+						
 						<div class="form-row">
-							<label>Mode</label>
-							<select v-model="audio.mode">
-								<option value="wbfm">WBFM</option>
-								<option value="nbfm">NBFM</option>
-								<option value="am">AM</option>
+							<label style="flex: 0 0 90px;">Snap Interval</label>
+							<div class="spin-group">
+								<input type="number" v-model.number="audio.snapInterval" step="1000">
+								<button @click="audio.snapInterval -= 1000">-</button>
+								<button @click="audio.snapInterval += 1000">+</button>
+							</div>
+						</div>
+
+						<div class="form-row">
+							<label style="flex: 0 0 90px;">De-emphasis</label>
+							<select v-model="audio.deEmphasis" style="width: 130px; margin-left: auto;">
+								<option value="none">None</option>
+								<option value="50us">50us</option>
+								<option value="75us">75us</option>
 							</select>
 						</div>
+
+						<div class="form-row squelch-row">
+							<label class="custom-checkbox">
+								<input type="checkbox" v-model="audio.squelchEnabled">
+								<span class="checkmark"></span>
+								Squelch
+							</label>
+							<div class="slider-group compact-slider" style="margin-left: 8px;">
+								<input type="range" v-model.number="audio.squelchLevel" min="-150" max="0" step="1" :disabled="!audio.squelchEnabled">
+								<span class="val">{{ audio.squelchLevel.toFixed(3) }}dB</span>
+							</div>
+						</div>
+
+						<div class="form-row full-checkbox-row">
+							<label class="custom-checkbox">
+								<input type="checkbox" v-model="audio.noiseReduction">
+								<span class="checkmark"></span>
+								IF Noise Reduction
+							</label>
+						</div>
+
+						<div class="form-row full-checkbox-row">
+							<label class="custom-checkbox">
+								<input type="checkbox" v-model="audio.stereo">
+								<span class="checkmark"></span>
+								Stereo
+							</label>
+						</div>
+
+						<div class="form-row full-checkbox-row">
+							<label class="custom-checkbox">
+								<input type="checkbox" v-model="audio.lowPass">
+								<span class="checkmark"></span>
+								Low Pass
+							</label>
+						</div>
+						
+						<!-- Keeping Volume for now, since it wasn't explicitly said to be removed, but placing at bottom -->
 						<div class="form-row">
 							<label>Volume</label>
 							<div class="slider-group">

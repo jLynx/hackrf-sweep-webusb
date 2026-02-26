@@ -136,7 +136,7 @@ class Worker {
 		if (decimation < 1) decimation = 1;
 		const actualDemodRate = sampleRate / decimation;
 
-		this.audioParams = { freq: centerFreq, mode: 'wbfm', enabled: false };
+		this.audioParams = { freq: centerFreq, mode: 'wfm', enabled: false, deEmphasis: '50us', squelchEnabled: false, squelchLevel: -100.0, lowPass: true, bandwidth: 150000 };
 		// Initialize the Rust NCO/Decimator
 		if (this.ddc) {
 			this.ddc.free();
@@ -152,6 +152,7 @@ class Worker {
 			dcAvg: 0,
 			audioDecimSum: 0, audioDecimCount: 0,
 			deemphPrev: 0,
+			lpPrev: 0,
 			agcGain: 0,
 			chunkCount: 0,
 		};
@@ -194,6 +195,31 @@ class Worker {
 				const numDemodSamples = numOutParams / 2;
 				if (numDemodSamples === 0) return;
 
+				// Squelch Calculation
+				let iqPower = 0;
+				for (let i = 0; i < numDemodSamples; i++) {
+					const dI = ddcOutput[i * 2];
+					const dQ = ddcOutput[i * 2 + 1];
+					iqPower += (dI * dI + dQ * dQ);
+				}
+				iqPower /= numDemodSamples;
+				const iqPowerDb = 10 * Math.log10(iqPower + 1e-12);
+
+				if (this.audioParams.squelchEnabled && iqPowerDb < this.audioParams.squelchLevel) {
+					// Muted by squelch
+					const zeros = new Float32Array(Math.ceil(numDemodSamples / audioDecimation) + 2);
+					let zeroIdx = 0;
+					for (let i = 0; i < numDemodSamples; i++) {
+						state.audioDecimCount++;
+						if (state.audioDecimCount >= audioDecimation) {
+							zeros[zeroIdx++] = 0;
+							state.audioDecimCount = 0;
+						}
+					}
+					if (zeroIdx > 0) audioCallback(zeros.slice(0, zeroIdx));
+					return;
+				}
+
 				const maxAudioSamples = Math.ceil(numDemodSamples / audioDecimation) + 2;
 				const audioSamples = new Float32Array(maxAudioSamples);
 				let audioIdx = 0;
@@ -207,11 +233,15 @@ class Worker {
 						const mag = Math.sqrt(dI * dI + dQ * dQ);
 						state.dcAvg = state.dcAvg * 0.999 + mag * 0.001;
 						demodSample = (mag - state.dcAvg) * 5.0;
-					} else {
+					} else if (this.audioParams.mode === 'usb' || this.audioParams.mode === 'lsb' || this.audioParams.mode === 'cw') {
+						demodSample = dI * 5.0; // Basic SSB/CW demodulation
+					} else if (this.audioParams.mode === 'raw') {
+						demodSample = dI;
+					} else { // FM modes
 						const conjI = dI * state.prevI + dQ * state.prevQ;
 						const conjQ = dQ * state.prevI - dI * state.prevQ;
 						demodSample = Math.atan2(conjQ, conjI);
-						if (this.audioParams.mode === 'nbfm') {
+						if (this.audioParams.mode === 'nfm') {
 							demodSample *= 5.0 / Math.PI;
 						} else {
 							demodSample /= Math.PI;
@@ -234,13 +264,25 @@ class Worker {
 
 				const result = audioSamples.slice(0, audioIdx);
 
-				if (this.audioParams.mode === 'wbfm' && result.length > 0) {
+				// De-emphasis
+				if ((this.audioParams.mode === 'wfm' || this.audioParams.mode === 'nfm') && this.audioParams.deEmphasis !== 'none' && result.length > 0) {
 					const dt = 1.0 / AUDIO_RATE;
-					const RC = 75e-6; // 75us for americas
+					const RC = this.audioParams.deEmphasis === '50us' ? 50e-6 : 75e-6;
 					const alpha = Math.exp(-dt / RC);
 					for (let i = 0; i < result.length; i++) {
 						state.deemphPrev = alpha * state.deemphPrev + (1 - alpha) * result[i];
 						result[i] = state.deemphPrev;
+					}
+				}
+
+				// Low Pass Filter (simple RC lowpass ~ 3.4kHz for voice if enabled)
+				if (this.audioParams.lowPass && result.length > 0) {
+					const dt = 1.0 / AUDIO_RATE;
+					const RC_LP = 1.0 / (2.0 * Math.PI * 3400); // 3.4kHz cutoff
+					const alphaLp = Math.exp(-dt / RC_LP);
+					for (let i = 0; i < result.length; i++) {
+						state.lpPrev = alphaLp * state.lpPrev + (1 - alphaLp) * result[i];
+						result[i] = state.lpPrev;
 					}
 				}
 
