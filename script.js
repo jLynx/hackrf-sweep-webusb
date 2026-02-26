@@ -17,6 +17,10 @@ createApp({
 				sampleRate: 8000000,
 				fftSize: 2048,
 			},
+			display: {
+				minDB: -70.0,
+				maxDB: 0.0,
+			},
 			gains: {
 				lna: 16,
 				vga: 16,
@@ -182,6 +186,8 @@ createApp({
 				new WaterfallGL(waterfall, fftSize, 512) :
 				new Waterfall(waterfall, fftSize, 512);
 
+			this.waterfallEngine.setRange(this.display.minDB, this.display.maxDB);
+
 			const rect = this.$refs.fftContainer.getBoundingClientRect();
 			fft.width = fftSize;
 			fft.height = rect.height;
@@ -213,32 +219,40 @@ createApp({
 			// Spectrum Data
 			ctx.save();
 			ctx.beginPath();
-			ctx.moveTo(0, h);
 
 			const pointsToDraw = data.length / this.view.zoomScale;
 			const startIdx = Math.floor(data.length * this.view.zoomOffset);
+			const dbRange = this.display.maxDB - this.display.minDB;
 
 			for (let i = 0; i < pointsToDraw; i++) {
 				const dataIdx = startIdx + i;
 				if (dataIdx >= data.length) break;
-				// data[i] is rough dB, from -120 to -20 mostly, adapt visual scale
-				// e.g. -110 is bottom, -10 is top
-				const n = (data[dataIdx] + 110) / 100;
+
+				// Map current dB into our viewport max/min
+				let valDB = data[dataIdx];
+				valDB = Math.max(this.display.minDB, Math.min(this.display.maxDB, valDB));
+
+				// 0 is bottom (minDB), 1 is top (maxDB)
+				const n = (valDB - this.display.minDB) / dbRange;
 				let y = h - (h * n);
-				if (y < 0) y = 0;
-				if (y > h) y = h;
 
 				const x = (i / pointsToDraw) * w;
-				ctx.lineTo(x, y);
+
+				if (i === 0) {
+					ctx.moveTo(x, y);
+				} else {
+					ctx.lineTo(x, y);
+				}
 			}
-			ctx.strokeStyle = "#4da6ff";
-			ctx.lineWidth = 1;
+			// Draw SDR++ style primary trace (white / light blue depending on theme, using an SDR++-like color)
+			ctx.strokeStyle = "rgba(255, 255, 255, 0.8)";
+			ctx.lineWidth = 1.0;
 			ctx.stroke();
 
-			// Fill under spectrum
+			// Fill under spectrum for the shadow trace like SDR++
 			ctx.lineTo(w, h);
 			ctx.lineTo(0, h);
-			ctx.fillStyle = "rgba(77, 166, 255, 0.1)";
+			ctx.fillStyle = "rgba(255, 255, 255, 0.2)";
 			ctx.fill();
 			ctx.restore();
 
@@ -331,7 +345,7 @@ createApp({
 			}
 		},
 		saveSetting() {
-			const json = JSON.stringify({ radio: this.radio, gains: this.gains, audio: this.audio, view: this.view });
+			const json = JSON.stringify({ radio: this.radio, gains: this.gains, audio: this.audio, view: this.view, display: this.display });
 			localStorage.setItem('sdr-web-setting', json);
 		},
 		loadSetting() {
@@ -343,6 +357,7 @@ createApp({
 					if (setting.gains) Object.assign(this.gains, setting.gains);
 					if (setting.audio) Object.assign(this.audio, setting.audio);
 					if (setting.view) Object.assign(this.view, setting.view);
+					if (setting.display) Object.assign(this.display, setting.display);
 					this.audio.enabled = false; // ensure audio is physically off on load
 				}
 			} catch (e) { }

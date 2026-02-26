@@ -18,55 +18,42 @@ HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABI
 ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-export function convertDecibelToRGB(dB) {
-	var r = 0, g = 0, b = 0;
-	var p = (dB + 48) / 48;
+const DEFAULT_COLOR_MAP = [
+	[0x00, 0x00, 0x20],
+	[0x00, 0x00, 0x30],
+	[0x00, 0x00, 0x50],
+	[0x00, 0x00, 0x91],
+	[0x1E, 0x90, 0xFF],
+	[0xFF, 0xFF, 0xFF],
+	[0xFF, 0xFF, 0x00],
+	[0xFE, 0x6D, 0x16],
+	[0xFF, 0x00, 0x00],
+	[0xC6, 0x00, 0x00],
+	[0x9F, 0x00, 0x00],
+	[0x75, 0x00, 0x00],
+	[0x4A, 0x00, 0x00]
+];
 
-	switch (true) {
-		case p > 5.0 / 6.0:
-			// yellow -> red
-			p = (p - (5 / 6.0)) / (1 / 6.0);
-			r = 255;
-			g = 255 * p;
-			b = 255 * p;
-			break;
-		case p > 4.0 / 6.0:
-			// yellow -> red
-			p = (p - (4 / 6.0)) / (1 / 6.0);
-			r = 255;
-			g = 255 * (1 - p);
-			b = 0;
-			break;
-		case p > 3.0 / 6.0:
-			// green -> yellow
-			p = (p - (3 / 6.0)) / (1 / 6.0);
-			r = 255 * p;
-			g = 255;
-			b = 0;
-			break;
-		case p > 2.0 / 6.0:
-			// light blue -> green
-			p = (p - (2 / 6.0)) / (1 / 6.0);
-			r = 0;
-			g = 255;
-			b = 255 * (1 - p);
-			break;
-		case p > 1.0 / 6.0:
-			// blue -> light blue
-			p = (p - (1 / 6.0)) / (1 / 6.0);
-			r = 0;
-			g = 255 * p;
-			b = 255;
-			break;
-		case p > 0:
-			// black -> blue
-			p = p / (1 / 6.0);
-			r = 0;
-			g = 0;
-			b = 255 * p;
-	}
+export function convertDecibelToRGB(dB, minDB = -70, maxDB = 0) {
+	// Map dB into a 0.0 to 1.0 range
+	let p = (dB - minDB) / (maxDB - minDB);
+	p = Math.max(0.0, Math.min(1.0, p));
 
-	return { r: r, g: g, b: b };
+	const colorCount = DEFAULT_COLOR_MAP.length;
+	const indexFloat = p * (colorCount - 1);
+	const indexBase = Math.floor(indexFloat);
+	const indexNext = Math.min(colorCount - 1, indexBase + 1);
+	const weightNext = indexFloat - indexBase;
+	const weightBase = 1.0 - weightNext;
+
+	const c1 = DEFAULT_COLOR_MAP[indexBase];
+	const c2 = DEFAULT_COLOR_MAP[indexNext];
+
+	const r = Math.round(c1[0] * weightBase + c2[0] * weightNext);
+	const g = Math.round(c1[1] * weightBase + c2[1] * weightNext);
+	const b = Math.round(c1[2] * weightBase + c2[2] * weightNext);
+
+	return { r, g, b };
 }
 
 
@@ -99,7 +86,14 @@ export class WaterfallGL {
 		this.historySize = historySize;
 		this.canvas = canvas;
 		this.data = new Uint8Array(this.bandSize * 4);
+		this.minDB = -70;
+		this.maxDB = 0;
 		this.initWebGL();
+	}
+
+	setRange(minDB, maxDB) {
+		this.minDB = minDB;
+		this.maxDB = maxDB;
 	}
 
 	initWebGL() {
@@ -281,7 +275,7 @@ export class WaterfallGL {
 
 		for (let i = 0, len = this.bandSize; i < len; i++) {
 			const n = i * 4;
-			const rgb = convertDecibelToRGB(array[i]);
+			const rgb = convertDecibelToRGB(array[i], this.minDB, this.maxDB);
 
 			data[n + 0] = rgb.r;
 			data[n + 1] = rgb.g;
@@ -325,6 +319,9 @@ export class Waterfall {
 		this.ctx = this.canvas.getContext('2d');
 		this.ctx.imageSmoothingEnabled = false;
 
+		this.minDB = -70;
+		this.maxDB = 0;
+
 		// internal buffer for drawing full width
 		this.offscreen = document.createElement('canvas');
 		this.offscreen.width = this.bandSize;
@@ -338,6 +335,11 @@ export class Waterfall {
 	setZoom(offset, scale) {
 		this.zoomOffset = offset;
 		this.zoomScale = scale;
+	}
+
+	setRange(minDB, maxDB) {
+		this.minDB = minDB;
+		this.maxDB = maxDB;
 	}
 
 	renderLine(array) {
@@ -355,7 +357,7 @@ export class Waterfall {
 
 		for (var i = 0, len = offscreen.width; i < len; i++) {
 			var n = i * 4;
-			var rgb = convertDecibelToRGB(array[i]);
+			var rgb = convertDecibelToRGB(array[i], this.minDB, this.maxDB);
 
 			data[n + 0] = rgb.r;
 			data[n + 1] = rgb.g;
