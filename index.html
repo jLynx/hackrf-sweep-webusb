@@ -105,6 +105,49 @@
 					<input type="checkbox" v-model="options.peakHold">
 					Peak Hold
 				</label>
+				<div class="divider"></div>
+				<div class="section-title">Audio Receiver</div>
+				<div class="field">
+					<label>Tune Frequency</label>
+					<div class="field-input">
+						<input v-model.number="audio.frequency" type="number" step="0.001"
+							placeholder="Click spectrum" :disabled="audio.listening">
+						<span class="field-suffix">MHz</span>
+					</div>
+					<div class="caption" v-if="audio.frequency === null">Click on the spectrum to select</div>
+				</div>
+				<div class="field">
+					<label>Demodulation</label>
+					<div class="field-input">
+						<select v-model="audio.mode" :disabled="audio.listening">
+							<option value="wbfm">FM Broadcast (WBFM)</option>
+							<option value="nbfm">Narrowband FM</option>
+							<option value="am">AM</option>
+						</select>
+					</div>
+				</div>
+				<div class="field">
+					<label>Volume</label>
+					<div class="field-input">
+						<input v-model.number="audio.volume" type="range" min="0" max="100" step="1"
+							class="field-range">
+						<input v-model.number="audio.volume" type="number" min="0" max="100" step="1"
+							class="field-number">
+						<span class="field-suffix">%</span>
+					</div>
+				</div>
+				<div style="margin-top: 8px">
+					<button class="btn btn-listen" v-on:click="listen" v-if="!audio.listening"
+						:disabled="audio.frequency === null || !connected">Listen</button>
+					<button class="btn btn-stop-listen" v-on:click="stopListening"
+						v-if="audio.listening">Stop Listening</button>
+					<button class="btn" v-on:click="testTone" style="margin-left: 8px"
+						v-if="!audio.listening">Test Tone</button>
+				</div>
+				<div class="audio-status" v-if="audio.listening">
+					<span class="pulse"></span>
+					Listening to {{ audio.frequency }} MHz
+				</div>
 			</div>
 			<div class="body-2">
 				{{ info.boardName }} (id:{{ info.boardId }})<br>

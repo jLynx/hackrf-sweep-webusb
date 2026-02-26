@@ -428,18 +428,27 @@ class HackRF {
 
 	async startRx(callback) {
 		if (this.rxRunning) {
-			throw "already started";
+			console.log('startRx: already running, stopping first...');
+			await this.stopRx();
 		}
 
 		await this.setTransceiverMode(HackRF.HACKRF_TRANSCEIVER_MODE_RECEIVE);
 		const transfer = async () => {
 			await Promise.resolve();
 			while (this.rxRunning) {
-				const result = await this.device.transferIn(1, HackRF.TRANSFER_BUFFER_SIZE);
-				if (result.status !== 'ok') {
-					throw 'failed to get transfer';
+				try {
+					const result = await this.device.transferIn(1, HackRF.TRANSFER_BUFFER_SIZE);
+					if (result.status !== 'ok') {
+						console.error('startRx: transfer status not ok:', result.status);
+						break;
+					}
+					callback(new Uint8Array(result.data.buffer, 0, result.data.byteLength));
+				} catch (e) {
+					if (this.rxRunning) {
+						console.error('startRx: transfer error:', e.message || e);
+					}
+					break;
 				}
-				callback(new Uint8Array(result.data.buffer, 0, result.data.byteLength));
 			}
 			console.log('rx transfer ended (rx)');
 		};
@@ -450,18 +459,27 @@ class HackRF {
 		await this.usbApiRequired(0x0104);
 
 		if (this.rxRunning) {
-			throw "already started";
+			console.log('startRxSweep: already running, stopping first...');
+			await this.stopRx();
 		}
 
 		await this.setTransceiverMode(HackRF.TRANSCEIVER_MODE_RX_SWEEP);
 		const transfer = async () => {
 			await Promise.resolve();
 			while (this.rxRunning) {
-				const result = await this.device.transferIn(1, HackRF.TRANSFER_BUFFER_SIZE);
-				if (result.status !== 'ok') {
-					throw 'failed to get transfer';
+				try {
+					const result = await this.device.transferIn(1, HackRF.TRANSFER_BUFFER_SIZE);
+					if (result.status !== 'ok') {
+						console.error('startRxSweep: transfer status not ok:', result.status);
+						break;
+					}
+					callback(new Uint8Array(result.data.buffer, 0, result.data.byteLength));
+				} catch (e) {
+					if (this.rxRunning) {
+						console.error('startRxSweep: transfer error:', e.message || e);
+					}
+					break;
 				}
-				callback(new Uint8Array(result.data.buffer, 0, result.data.byteLength));
 			}
 			console.log('rx transfer ended (rx sweep)');
 		};
@@ -549,12 +567,19 @@ class HackRF {
 		if (this.rxRunning) {
 			console.log('stopRx waiting');
 			const promises = this.rxRunning;
-			console.log(promises);
 			this.rxRunning = null;
-			await Promise.all(promises);
+			try {
+				await Promise.allSettled(promises);
+			} catch (e) {
+				console.warn('stopRx: error during transfer shutdown:', e.message || e);
+			}
 		}
 		console.log('stopRx');
-		await this.setTransceiverMode(HackRF.HACKRF_TRANSCEIVER_MODE_OFF);
+		try {
+			await this.setTransceiverMode(HackRF.HACKRF_TRANSCEIVER_MODE_OFF);
+		} catch (e) {
+			console.warn('stopRx: error setting mode off:', e.message || e);
+		}
 	}
 
 	async stopTx() {

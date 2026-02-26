@@ -199,6 +199,55 @@ body {
 	margin: 16px 0;
 }
 
+/* Section Title */
+.section-title {
+	font-size: 13px;
+	font-weight: 600;
+	color: #aaa;
+	margin-bottom: 12px;
+	text-transform: uppercase;
+	letter-spacing: 0.5px;
+}
+
+/* Audio Controls */
+.btn-listen {
+	background: #e91e63;
+}
+
+.btn-listen:hover:not(:disabled) {
+	background: #c2185b;
+}
+
+.btn-stop-listen {
+	background: #757575;
+}
+
+.btn-stop-listen:hover:not(:disabled) {
+	background: #616161;
+}
+
+.audio-status {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 8px 0;
+	font-size: 12px;
+	color: #e91e63;
+}
+
+.audio-status .pulse {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: #e91e63;
+	animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+	0%, 100% { opacity: 1; }
+	50% { opacity: 0.3; }
+}
+
 /* Typography */
 .caption {
 	margin: 8px 0;

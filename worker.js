@@ -224,6 +224,184 @@ class Worker {
 		);
 	}
 
+	async startRxAudio(opts, callback) {
+		const { hackrf } = this;
+		const { freq, mode, lnaGain, vgaGain, ampEnabled } = opts;
+
+		console.log('startRxAudio:', { freq, mode, lnaGain, vgaGain, ampEnabled });
+
+		const RX_SAMPLE_RATE = 2400000;
+		const AUDIO_RATE = 48000;
+
+		// Configure hardware
+		await hackrf.setSampleRateManual(RX_SAMPLE_RATE, 1);
+		await hackrf.setBasebandFilterBandwidth(
+			HackRF.computeBasebandFilterBw(RX_SAMPLE_RATE)
+		);
+		await hackrf.setFreq(freq * 1e6);
+		console.log('startRxAudio: hardware configured, starting RX...');
+
+		// ── DSP Pipeline ──────────────────────────────────────────────
+		// 1. 4th-order Butterworth IIR low-pass (fc=100 kHz) on IQ
+		//    → acts as channel filter, rejecting out-of-band noise
+		// 2. Decimate IQ by 10 (2.4 MSPS → 240 kSPS) with averaging
+		// 3. FM/AM demodulate at 240 kSPS
+		// 4. Decimate audio by 5 (240 kSPS → 48 kSPS)
+		// 5. De-emphasis (50µs for NZ/EU/AU)
+		// 6. AGC + soft clip
+		const IQ_DECIM = 10;
+		const AUDIO_DECIM = 5;
+
+		// 4th-order Butterworth LPF at fc=100kHz, fs=2.4MHz
+		// Implemented as 2 cascaded biquad sections
+		// Computed via bilinear transform: K = tan(π·fc/fs) = 0.131652
+		const lpfSections = [
+			{ b0: 0.013749, b1: 0.027498, b2: 0.013749, a1: -1.559076, a2: 0.614080 }, // Q=0.5412
+			{ b0: 0.015501, b1: 0.031002, b2: 0.015501, a1: -1.757757, a2: 0.819756 }, // Q=1.3066
+		];
+
+		const state = {
+			// IIR filter state: 2 sections × 2 channels (Direct Form II Transposed)
+			fI: [{ s1: 0, s2: 0 }, { s1: 0, s2: 0 }],
+			fQ: [{ s1: 0, s2: 0 }, { s1: 0, s2: 0 }],
+			// IQ decimation accumulator
+			iqDecimI: 0, iqDecimQ: 0, iqDecimCount: 0,
+			// FM discriminator previous sample
+			prevI: 0, prevQ: 0,
+			// AM DC removal
+			dcAvg: 0,
+			// Audio decimation
+			audioDecimSum: 0, audioDecimCount: 0,
+			// De-emphasis
+			deemphPrev: 0,
+			// AGC
+			agcGain: 0,
+			chunkCount: 0,
+		};
+
+		// Biquad filter – Direct Form II Transposed (numerically stable)
+		function biquad(x, sec, st) {
+			const y = sec.b0 * x + st.s1;
+			st.s1 = sec.b1 * x - sec.a1 * y + st.s2;
+			st.s2 = sec.b2 * x - sec.a2 * y;
+			return y;
+		}
+
+		// Start RX (sets transceiver mode to RECEIVE internally)
+		await hackrf.startRx((data) => {
+			state.chunkCount++;
+			if (state.chunkCount <= 3) {
+				console.log(`startRxAudio: chunk #${state.chunkCount}, bytes=${data.length}`);
+			}
+
+			const signed = new Int8Array(data.buffer, data.byteOffset, data.length);
+			const numIQSamples = signed.length / 2;
+			const maxAudioSamples = Math.ceil(numIQSamples / (IQ_DECIM * AUDIO_DECIM)) + 2;
+			const audioSamples = new Float32Array(maxAudioSamples);
+			let audioIdx = 0;
+
+			for (let i = 0; i < numIQSamples; i++) {
+				let I = signed[i * 2] / 128.0;
+				let Q = signed[i * 2 + 1] / 128.0;
+
+				// Apply 4th-order Butterworth channel filter (fc=100kHz)
+				// This rejects noise outside ±100 kHz, matching SDR++ "bandwidth 150kHz"
+				I = biquad(biquad(I, lpfSections[0], state.fI[0]), lpfSections[1], state.fI[1]);
+				Q = biquad(biquad(Q, lpfSections[0], state.fQ[0]), lpfSections[1], state.fQ[1]);
+
+				// Accumulate for IQ decimation (averaging provides additional anti-alias)
+				state.iqDecimI += I;
+				state.iqDecimQ += Q;
+				state.iqDecimCount++;
+
+				if (state.iqDecimCount >= IQ_DECIM) {
+					const dI = state.iqDecimI / IQ_DECIM;
+					const dQ = state.iqDecimQ / IQ_DECIM;
+					state.iqDecimI = 0;
+					state.iqDecimQ = 0;
+					state.iqDecimCount = 0;
+
+					// Demodulate at 240 kSPS
+					let demodSample;
+					if (mode === 'am') {
+						const mag = Math.sqrt(dI * dI + dQ * dQ);
+						state.dcAvg = state.dcAvg * 0.999 + mag * 0.001;
+						demodSample = (mag - state.dcAvg) * 5.0;
+					} else {
+						const conjI = dI * state.prevI + dQ * state.prevQ;
+						const conjQ = dQ * state.prevI - dI * state.prevQ;
+						demodSample = Math.atan2(conjQ, conjI);
+						if (mode === 'nbfm') {
+							demodSample *= 5.0 / Math.PI;
+						} else {
+							demodSample /= Math.PI;
+						}
+					}
+					state.prevI = dI;
+					state.prevQ = dQ;
+
+					// Audio decimation (240 kSPS → 48 kSPS)
+					state.audioDecimSum += demodSample;
+					state.audioDecimCount++;
+
+					if (state.audioDecimCount >= AUDIO_DECIM) {
+						audioSamples[audioIdx++] = state.audioDecimSum / AUDIO_DECIM;
+						state.audioDecimSum = 0;
+						state.audioDecimCount = 0;
+					}
+				}
+			}
+
+			if (audioIdx === 0) return;
+
+			const result = audioSamples.slice(0, audioIdx);
+
+			// De-emphasis filter for WBFM
+			// 50µs for NZ / Europe / Australia / Japan
+			// (use 75e-6 for North America)
+			if (mode === 'wbfm' && result.length > 0) {
+				const dt = 1.0 / AUDIO_RATE;
+				const RC = 50e-6;
+				const alpha = Math.exp(-dt / RC);
+				for (let i = 0; i < result.length; i++) {
+					state.deemphPrev = alpha * state.deemphPrev + (1 - alpha) * result[i];
+					result[i] = state.deemphPrev;
+				}
+			}
+
+			// AGC
+			let rms = 0;
+			for (let i = 0; i < result.length; i++) rms += result[i] * result[i];
+			rms = Math.sqrt(rms / result.length);
+
+			const targetRMS = 0.15;
+			const desiredGain = rms > 1e-6 ? targetRMS / rms : 1000;
+			const maxGain = 5000;
+			const clampedGain = Math.min(desiredGain, maxGain);
+
+			if (!state.agcGain) state.agcGain = clampedGain;
+			state.agcGain = state.agcGain * 0.95 + clampedGain * 0.05;
+
+			for (let i = 0; i < result.length; i++) {
+				result[i] *= state.agcGain;
+				if (result[i] > 1.0) result[i] = 1.0;
+				else if (result[i] < -1.0) result[i] = -1.0;
+			}
+
+			if (state.chunkCount <= 5) {
+				console.log(`startRxAudio: sending ${result.length} samples, rms=${rms.toFixed(6)}, agcGain=${state.agcGain.toFixed(1)}`);
+			}
+			callback(result);
+		});
+
+		// Apply gains AFTER startRx — setTransceiverMode(RECEIVE) inside
+		// startRx resets the RF chain, so gains must be set after it.
+		if (ampEnabled !== undefined) await hackrf.setAmpEnable(ampEnabled);
+		if (lnaGain !== undefined) await hackrf.setLnaGain(lnaGain);
+		if (vgaGain !== undefined) await hackrf.setVgaGain(vgaGain);
+		console.log('startRxAudio: gains applied after RX start');
+	}
+
 	async setSampleRateManual(freq, divider) {
 		await this.hackrf.setSampleRateManual(freq, divider);
 	}

@@ -18,7 +18,7 @@ HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABI
 ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-import { createApp } from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
+import { createApp } from "./node_modules/vue/dist/vue.esm-browser.js";
 import * as Comlink from "./node_modules/comlink/dist/esm/comlink.mjs";
 import { HackRF } from "./hackrf.js";
 import { Waterfall, WaterfallGL } from "./utils.js";
@@ -62,6 +62,13 @@ createApp({
 			metrics: {
 				sweepPerSec: 0,
 				bytesPerSec: 0,
+			},
+
+			audio: {
+				frequency: null,
+				mode: 'wbfm',
+				volume: 50,
+				listening: false,
 			},
 
 			currentHover: "",
@@ -205,6 +212,9 @@ createApp({
 		},
 
 		disconnect: async function () {
+			if (this.audio.listening) {
+				await this.stopListening();
+			}
 			await this.backend.close();
 			console.log('disconnected');
 			this.connected = false;
@@ -325,16 +335,175 @@ createApp({
 					ctxFft.strokeStyle = "#fff";
 					ctxFft.stroke();
 					ctxFft.restore();
+
+						// Draw selected frequency marker
+						if (this.audio.frequency !== null) {
+							const markerX = (this.audio.frequency - lowFreq) / bandwidth * freqBinCount;
+							if (markerX >= 0 && markerX <= freqBinCount) {
+								ctxFft.save();
+								ctxFft.strokeStyle = "#ff4444";
+								ctxFft.lineWidth = 2;
+								ctxFft.setLineDash([4, 4]);
+								ctxFft.beginPath();
+								ctxFft.moveTo(markerX, 0);
+								ctxFft.lineTo(markerX, canvasFft.height);
+								ctxFft.stroke();
+
+								ctxFft.fillStyle = "#ff4444";
+								ctxFft.font = "12px sans-serif";
+								ctxFft.setLineDash([]);
+								ctxFft.fillText(this.audio.frequency.toFixed(1) + " MHz", markerX + 4, 14);
+								ctxFft.restore();
+							}
+						}
 				});
 			}));
-
 			this.running = true;
 			this.captureStartTime = Date.now();
 		},
 
 		stop: async function () {
-			this.backend.stopRx();
+			await this.backend.stopRx();
 			this.running = false;
+		},
+
+		selectFrequency: function (freq) {
+			if (this.audio.listening) return;
+			this.audio.frequency = parseFloat(freq.toFixed(3));
+		},
+
+		listen: async function () {
+			if (this.audio.listening || this.audio.frequency === null || !this.connected) return;
+
+			// Create audio context IMMEDIATELY (must be in user-gesture callback
+			// before any awaits, or Chrome will suspend it)
+			this.audioCtx = new AudioContext({ sampleRate: 48000 });
+			this.gainNode = this.audioCtx.createGain();
+			this.gainNode.gain.value = this.audio.volume / 100;
+			this.gainNode.connect(this.audioCtx.destination);
+			this.nextPlayTime = 0;
+
+			try {
+				// Stop sweep if running
+				if (this.running) {
+					await this.stop();
+				}
+
+				// Ensure AudioContext is running (Chrome autoplay policy)
+				if (this.audioCtx.state === 'suspended') {
+					await this.audioCtx.resume();
+				}
+				console.log('AudioContext state:', this.audioCtx.state, 'sampleRate:', this.audioCtx.sampleRate);
+
+				this.audio.listening = true;
+
+				this.snackbar.show = true;
+				this.snackbar.message = `Listening to ${this.audio.frequency} MHz (${this.audio.mode.toUpperCase()})`;
+
+				await this.backend.startRxAudio(
+					{
+						freq: this.audio.frequency,
+						mode: this.audio.mode,
+						lnaGain: +this.options.lnaGain,
+						vgaGain: +this.options.vgaGain,
+						ampEnabled: this.options.ampEnabled,
+					},
+					Comlink.proxy((audioSamples) => {
+						if (!this.audio.listening) return;
+						this.playAudioSamples(audioSamples);
+					})
+				);
+			} catch (e) {
+				console.error('listen() error:', e);
+				this.audio.listening = false;
+				if (this.audioCtx) {
+					try { await this.audioCtx.close(); } catch (_) { }
+					this.audioCtx = null;
+					this.gainNode = null;
+				}
+				this.snackbar.show = true;
+				this.snackbar.message = 'Audio error: ' + (e.message || e);
+			}
+		},
+
+		playAudioSamples: function (samples) {
+			if (!this.audioCtx || !samples) return;
+
+			// Comlink may deserialize Float32Array as a plain object with
+			// numeric keys; coerce to a real Float32Array if needed.
+			let floats;
+			if (samples instanceof Float32Array) {
+				floats = samples;
+			} else if (ArrayBuffer.isView(samples)) {
+				floats = new Float32Array(samples.buffer, samples.byteOffset, samples.byteLength / 4);
+			} else {
+				// Plain array or object — convert manually
+				const len = samples.length || Object.keys(samples).length;
+				floats = new Float32Array(len);
+				for (let i = 0; i < len; i++) floats[i] = samples[i];
+			}
+
+			if (!floats.length) return;
+
+			// Debug: log first few calls
+			if (!this._audioDbgCount) this._audioDbgCount = 0;
+			if (this._audioDbgCount < 5) {
+				const maxVal = floats.reduce((a, b) => Math.max(a, Math.abs(b)), 0);
+				console.log(`playAudioSamples #${this._audioDbgCount}: type=${samples.constructor.name}, len=${floats.length}, max=${maxVal.toFixed(6)}, gain=${this.gainNode.gain.value}, ctxState=${this.audioCtx.state}`);
+				this._audioDbgCount++;
+			}
+
+			const buffer = this.audioCtx.createBuffer(1, floats.length, 48000);
+			buffer.getChannelData(0).set(floats);
+
+			const src = this.audioCtx.createBufferSource();
+			src.buffer = buffer;
+			src.connect(this.gainNode);
+
+			// Schedule-ahead buffering for gapless audio
+			if (this.nextPlayTime < this.audioCtx.currentTime) {
+				this.nextPlayTime = this.audioCtx.currentTime + 0.05;
+			}
+			src.start(this.nextPlayTime);
+			this.nextPlayTime += buffer.duration;
+		},
+
+		testTone: function () {
+			// Generate a 440Hz test tone for 1 second to verify speakers work
+			const ctx = new AudioContext({ sampleRate: 48000 });
+			const duration = 1.0;
+			const samples = 48000 * duration;
+			const buffer = ctx.createBuffer(1, samples, 48000);
+			const data = buffer.getChannelData(0);
+			for (let i = 0; i < samples; i++) {
+				data[i] = 0.3 * Math.sin(2 * Math.PI * 440 * i / 48000);
+			}
+			const src = ctx.createBufferSource();
+			src.buffer = buffer;
+			const gain = ctx.createGain();
+			gain.gain.value = this.audio.volume / 100;
+			src.connect(gain).connect(ctx.destination);
+			src.start();
+			src.onended = () => ctx.close();
+			this.snackbar.show = true;
+			this.snackbar.message = 'Playing 440Hz test tone...';
+		},
+
+		stopListening: async function () {
+			this.audio.listening = false;
+			this._audioDbgCount = 0;
+			try {
+				await this.backend.stopRx();
+			} catch (e) {
+				console.warn('stopListening: stopRx error (ignored):', e.message || e);
+			}
+			if (this.audioCtx) {
+				try { await this.audioCtx.close(); } catch (e) { }
+				this.audioCtx = null;
+				this.gainNode = null;
+			}
+			this.snackbar.show = true;
+			this.snackbar.message = 'Audio stopped';
 		},
 
 		labelFor: function (n) {
@@ -436,6 +605,25 @@ createApp({
 		this.$refs.waterfall.addEventListener('mouseleave', leaveListener);
 		this.$refs.fft.addEventListener('mousemove', hoverListenr);
 		this.$refs.fft.addEventListener('mouseleave', leaveListener);
+
+		const clickListener = (e) => {
+			if (this.audio.listening) return;
+			const rect = e.currentTarget.getBoundingClientRect();
+			const x = e.clientX - rect.x;
+			const p = x / rect.width;
+			const low = +this.range.start;
+			const high = +this.range.stop;
+			const freq = low + p * (high - low);
+			this.selectFrequency(freq);
+		};
+		this.$refs.waterfall.addEventListener('click', clickListener);
+		this.$refs.fft.addEventListener('click', clickListener);
+
+		this.$watch('audio.volume', (val) => {
+			if (this.gainNode) {
+				this.gainNode.gain.value = val / 100;
+			}
+		});
 
 		this.connect();
 	},

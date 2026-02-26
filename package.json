@@ -9,6 +9,7 @@
   "license": "GPL",
   "description": "",
   "dependencies": {
-    "comlink": "^4.4.2"
+    "comlink": "^4.4.2",
+    "vue": "^3.5.29"
   }
 }
