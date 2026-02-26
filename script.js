@@ -292,7 +292,9 @@ createApp({
 					await this.audioCtx.resume();
 				}
 				this.gainNode = this.audioCtx.createGain();
-				this.gainNode.gain.value = this.audio.volume / 100;
+				// SDR++ uses volume² curve: powf(guiVolume, 2)
+				const vol = this.audio.volume / 100;
+				this.gainNode.gain.value = vol * vol;
 				this.gainNode.connect(this.audioCtx.destination);
 				this.nextPlayTime = 0;
 				// Ring buffer to accumulate small audio chunks before scheduling
@@ -457,7 +459,8 @@ createApp({
 
 		this.$watch('audio', (newVal, oldVal) => {
 			if (this.gainNode) {
-				this.gainNode.gain.value = this.audio.volume / 100;
+				const vol = this.audio.volume / 100;
+				this.gainNode.gain.value = vol * vol; // SDR++ volume² curve
 			}
 			if (!this.vfoFocused) {
 				this.vfoDisplayFreq = this.formatFreq(this.audio.freq);

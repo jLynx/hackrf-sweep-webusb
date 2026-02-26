@@ -358,8 +358,6 @@ class Worker {
 			audioResampler: new RationalResampler(IF_RATE, AUDIO_RATE),
 			// Track last bandwidth sent to Rust
 			lastBandwidth: initialBandwidth,
-			// FM output gain (RMS-based AGC)
-			outputGain: 0,
 			// Track last mode to detect mode switches
 			lastMode: '',
 		};
@@ -398,7 +396,6 @@ class Worker {
 				// Detect mode switch → reset all DSP and JS audio state
 				if (mode !== state.lastMode) {
 					state.lastMode = mode;
-					state.outputGain = 0;
 					state.deemphPrev = 0;
 					state.dcAvg = 0;
 					state.agcGain = 1.0;
@@ -447,25 +444,11 @@ class Worker {
 						}
 					}
 
-					// ── Output level normalization (RMS-based AGC) ────────────
-					// Capped at reasonable max gain to prevent blast on squelch unmute
-					let rms = 0;
-					for (let i = 0; i < result.length; i++) rms += result[i] * result[i];
-					rms = Math.sqrt(rms / result.length);
-					const targetRMS = 0.15;
-					const desiredGain = rms > 1e-6 ? targetRMS / rms : 50;
-					const clampedGain = Math.min(desiredGain, 50);
-					if (!state.outputGain) state.outputGain = clampedGain;
-					// Faster attack (cap gain quickly), slower decay (raise gain slowly)
-					if (clampedGain < state.outputGain) {
-						// Signal got louder → reduce gain fast to avoid clipping
-						state.outputGain = state.outputGain * 0.7 + clampedGain * 0.3;
-					} else {
-						// Signal got quieter → raise gain slowly
-						state.outputGain = state.outputGain * 0.95 + clampedGain * 0.05;
-					}
+					// No AGC for FM modes (matches SDR++: quadrature demod already
+					// normalizes output by 1/deviation, producing ~±1.0 range).
+					// Volume is handled by the gain node in the audio context.
+					// Hard-clip as safety net.
 					for (let i = 0; i < result.length; i++) {
-						result[i] *= state.outputGain;
 						if (result[i] > 1.0) result[i] = 1.0;
 						else if (result[i] < -1.0) result[i] = -1.0;
 					}
