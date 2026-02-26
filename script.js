@@ -165,8 +165,9 @@ createApp({
 
 			this.running = true;
 
-			// Initially send audio params to backend 
-			this.updateBackendAudioParams();
+			// Enable audio by default when starting stream
+			this.audio.enabled = true;
+			this.toggleAudioCheckbox();
 		},
 		initCanvas() {
 			const { fftSize } = this.radio;
