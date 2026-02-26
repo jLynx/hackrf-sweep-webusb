@@ -383,6 +383,9 @@ createApp({
 			this.gainNode.connect(this.audioCtx.destination);
 			this.nextPlayTime = 0;
 
+			// Remember if sweep was running so we can restart it later
+			this.wasRunning = this.running;
+
 			try {
 				// Stop sweep if running
 				if (this.running) {
@@ -396,6 +399,30 @@ createApp({
 				console.log('AudioContext state:', this.audioCtx.state, 'sampleRate:', this.audioCtx.sampleRate);
 
 				this.audio.listening = true;
+
+				// ── Set up narrowband spectrum/waterfall display ───────
+				const { canvasFft, canvasWf } = this;
+				const RX_BW_MHZ = 2.4;
+				const SPECTRUM_FFT_SIZE = 1024;
+				const centerFreq = this.audio.frequency;
+				const rxLowFreq = centerFreq - RX_BW_MHZ / 2;
+				const rxHighFreq = centerFreq + RX_BW_MHZ / 2;
+
+				// Store for labelFor override during listening
+				this.audioSpectrumRange = { start: rxLowFreq, stop: rxHighFreq };
+
+				const freqBinCount = SPECTRUM_FFT_SIZE;
+				const nx = Math.pow(2, Math.ceil(Math.log2(freqBinCount)));
+				const maxTextureSize = 16384;
+				const useWebGL = nx <= maxTextureSize;
+				const waterfall = useWebGL ?
+					new WaterfallGL(canvasWf, freqBinCount, 256) :
+					new Waterfall(canvasWf, freqBinCount, 256);
+
+				canvasFft.height = 200;
+				canvasFft.width = freqBinCount;
+				const ctxFft = canvasFft.getContext('2d');
+				this.audioWaterfall = waterfall;
 
 				this.snackbar.show = true;
 				this.snackbar.message = `Listening to ${this.audio.frequency} MHz (${this.audio.mode.toUpperCase()})`;
@@ -411,11 +438,72 @@ createApp({
 					Comlink.proxy((audioSamples) => {
 						if (!this.audio.listening) return;
 						this.playAudioSamples(audioSamples);
+					}),
+					Comlink.proxy((spectrumData) => {
+						if (!this.audio.listening) return;
+						// Convert spectrum data to Float32Array if needed
+						let data;
+						if (spectrumData instanceof Float32Array) {
+							data = spectrumData;
+						} else {
+							const len = spectrumData.length || Object.keys(spectrumData).length;
+							data = new Float32Array(len);
+							for (let i = 0; i < len; i++) data[i] = spectrumData[i];
+						}
+
+						requestAnimationFrame(() => {
+							// Render waterfall
+							waterfall.renderLine(data);
+
+							// Render FFT spectrum
+							ctxFft.fillStyle = "rgba(0, 0, 0, 0.15)";
+							ctxFft.fillRect(0, 0, canvasFft.width, canvasFft.height);
+
+							// Draw grid lines
+							ctxFft.strokeStyle = "rgba(255, 255, 255, 0.1)";
+							ctxFft.lineWidth = 1;
+							ctxFft.beginPath();
+							for (let p of [0.25, 0.5, 0.75]) {
+								ctxFft.moveTo(canvasFft.width * p, 0);
+								ctxFft.lineTo(canvasFft.width * p, canvasFft.height);
+							}
+							ctxFft.stroke();
+
+							// Draw spectrum line
+							ctxFft.save();
+							ctxFft.beginPath();
+							ctxFft.moveTo(0, canvasFft.height);
+							for (let i = 0; i < data.length; i++) {
+								const n = (data[i] + 45) / 42;
+								ctxFft.lineTo(i, canvasFft.height - canvasFft.height * n);
+							}
+							ctxFft.strokeStyle = "#fff";
+							ctxFft.stroke();
+							ctxFft.restore();
+
+							// Draw center frequency marker (tuned frequency)
+							const markerX = freqBinCount / 2;
+							ctxFft.save();
+							ctxFft.strokeStyle = "#ff4444";
+							ctxFft.lineWidth = 2;
+							ctxFft.setLineDash([4, 4]);
+							ctxFft.beginPath();
+							ctxFft.moveTo(markerX, 0);
+							ctxFft.lineTo(markerX, canvasFft.height);
+							ctxFft.stroke();
+
+							ctxFft.fillStyle = "#ff4444";
+							ctxFft.font = "12px sans-serif";
+							ctxFft.setLineDash([]);
+							ctxFft.fillText(centerFreq.toFixed(3) + " MHz", markerX + 4, 14);
+							ctxFft.restore();
+						});
 					})
 				);
 			} catch (e) {
 				console.error('listen() error:', e);
 				this.audio.listening = false;
+				this.audioSpectrumRange = null;
 				if (this.audioCtx) {
 					try { await this.audioCtx.close(); } catch (_) { }
 					this.audioCtx = null;
@@ -492,6 +580,7 @@ createApp({
 		stopListening: async function () {
 			this.audio.listening = false;
 			this._audioDbgCount = 0;
+			this.audioSpectrumRange = null;
 			try {
 				await this.backend.stopRx();
 			} catch (e) {
@@ -502,11 +591,28 @@ createApp({
 				this.audioCtx = null;
 				this.gainNode = null;
 			}
+			if (this.audioWaterfall) {
+				this.audioWaterfall = null;
+			}
 			this.snackbar.show = true;
 			this.snackbar.message = 'Audio stopped';
+
+			// Restart sweep if it was running before listening
+			if (this.wasRunning) {
+				this.wasRunning = false;
+				await this.start();
+			}
 		},
 
 		labelFor: function (n) {
+			// When listening, show narrowband RX range
+			if (this.audioSpectrumRange) {
+				const lowFreq = this.audioSpectrumRange.start;
+				const highFreq = this.audioSpectrumRange.stop;
+				const bandwidth = highFreq - lowFreq;
+				const freq = bandwidth * n + lowFreq;
+				return freq.toFixed(2);
+			}
 			const lowFreq = +this.range.start;
 			const highFreq = +this.range.stop;
 			const bandwidth = highFreq - lowFreq;

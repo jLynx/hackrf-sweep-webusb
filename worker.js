@@ -224,7 +224,7 @@ class Worker {
 		);
 	}
 
-	async startRxAudio(opts, callback) {
+	async startRxAudio(opts, audioCallback, spectrumCallback) {
 		const { hackrf } = this;
 		const { freq, mode, lnaGain, vgaGain, ampEnabled } = opts;
 
@@ -232,6 +232,7 @@ class Worker {
 
 		const RX_SAMPLE_RATE = 2400000;
 		const AUDIO_RATE = 48000;
+		const SPECTRUM_FFT_SIZE = 1024;
 
 		// Configure hardware
 		await hackrf.setSampleRateManual(RX_SAMPLE_RATE, 1);
@@ -240,6 +241,27 @@ class Worker {
 		);
 		await hackrf.setFreq(freq * 1e6);
 		console.log('startRxAudio: hardware configured, starting RX...');
+
+		// ── Spectrum FFT setup ────────────────────────────────────────
+		const spectrumWindowFunc = (x) => {
+			// blackman window
+			const alpha = 0.16;
+			const a0 = (1.0 - alpha) / 2.0;
+			const a1 = 1.0 / 2.0;
+			const a2 = alpha / 2.0;
+			return a0 - a1 * Math.cos(2 * Math.PI * x) + a2 * Math.cos(4 * Math.PI * x);
+		};
+		const spectrumWindow = new Float32Array(SPECTRUM_FFT_SIZE);
+		for (let i = 0; i < SPECTRUM_FFT_SIZE; i++) {
+			spectrumWindow[i] = spectrumWindowFunc(i / SPECTRUM_FFT_SIZE);
+		}
+		const spectrumFft = new FFT(SPECTRUM_FFT_SIZE, spectrumWindow);
+		spectrumFft.set_smoothing_time_constant(0.3);
+		const spectrumOutput = new Float32Array(SPECTRUM_FFT_SIZE);
+		// IQ buffer for spectrum FFT — accumulate raw unsigned samples
+		const iqBuffer = new Uint8Array(SPECTRUM_FFT_SIZE * 2);
+		let iqBufferPos = 0;
+		let spectrumThrottle = 0;
 
 		// ── DSP Pipeline ──────────────────────────────────────────────
 		// 1. 4th-order Butterworth IIR low-pass (fc=100 kHz) on IQ
@@ -296,6 +318,30 @@ class Worker {
 
 			const signed = new Int8Array(data.buffer, data.byteOffset, data.length);
 			const numIQSamples = signed.length / 2;
+
+			// ── Spectrum: feed raw unsigned IQ into FFT buffer ────────
+			for (let i = 0; i < data.length; i++) {
+				iqBuffer[iqBufferPos++] = data[i];
+				if (iqBufferPos >= iqBuffer.length) {
+					iqBufferPos = 0;
+					spectrumThrottle++;
+					// Send spectrum at ~30 fps (RX produces many chunks/sec)
+					if (spectrumThrottle % 3 === 0) {
+						spectrumFft.fft(iqBuffer, spectrumOutput);
+						// Re-order: FFT output is [0..N/2, -N/2..0], rearrange
+						// to [-N/2..0..N/2] so low freq is on the left
+						const reordered = new Float32Array(SPECTRUM_FFT_SIZE);
+						const half = SPECTRUM_FFT_SIZE / 2;
+						for (let j = 0; j < half; j++) {
+							reordered[j] = spectrumOutput[j + half];
+							reordered[j + half] = spectrumOutput[j];
+						}
+						spectrumCallback(reordered);
+					}
+				}
+			}
+
+			// ── Audio demodulation pipeline ───────────────────────────
 			const maxAudioSamples = Math.ceil(numIQSamples / (IQ_DECIM * AUDIO_DECIM)) + 2;
 			const audioSamples = new Float32Array(maxAudioSamples);
 			let audioIdx = 0;
@@ -391,7 +437,7 @@ class Worker {
 			if (state.chunkCount <= 5) {
 				console.log(`startRxAudio: sending ${result.length} samples, rms=${rms.toFixed(6)}, agcGain=${state.agcGain.toFixed(1)}`);
 			}
-			callback(result);
+			audioCallback(result);
 		});
 
 		// Apply gains AFTER startRx — setTransceiverMode(RECEIVE) inside

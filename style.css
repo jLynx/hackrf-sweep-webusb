@@ -243,6 +243,11 @@ body {
 	animation: pulse 1.5s ease-in-out infinite;
 }
 
+.audio-status .audio-bw {
+	color: #888;
+	font-size: 11px;
+}
+
 @keyframes pulse {
 	0%, 100% { opacity: 1; }
 	50% { opacity: 0.3; }
