@@ -1,219 +1,148 @@
 <!DOCTYPE html>
-<html>
-
+<html lang="en">
 <head>
 	<meta charset="utf-8" />
 	<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-
-	<title>HackRF Sweep Mode WebUSB</title>
+	<title>SDR WebViewer (HackRF)</title>
+	<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=Roboto+Mono&display=swap" rel="stylesheet">
 	<link rel="stylesheet" href="style.css">
 	<script src="script.js" type="module"></script>
 </head>
-
 <body>
-	<div id="app">
-		<div class="actions">
-			<div>
-				<template v-if="!connected">
-					<button class="btn btn-primary" v-on:click="connect" :disabled="!backend">connect</button>
-				</template>
-				<template v-if="connected">
-					<button class="btn btn-primary" v-on:click="start" v-if="!running">start</button>
-					<button class="btn btn-secondary" v-on:click="stop" v-if="running">stop</button>
-					<button class="btn" v-on:click="disconnect" v-if="connected">disconnect</button>
-				</template>
-				<div class="caption">{{metrics.sweepPerSec.toFixed(1)}} sweep/sec
-					{{(metrics.bytesPerSec/1e6).toFixed(1)}} MB/sec</div>
+	<div id="app" v-cloak>
+		<!-- Top Bar -->
+		<div class="top-bar">
+			<div class="brand">SDR WebViewer</div>
+			<div class="vfo-display">
+				<div class="vfo-freq">
+					{{ formatFreq(audio.freq) }}
+				</div>
+				<div class="vfo-unit">MHz</div>
 			</div>
-			<div class="form">
-				<div class="field">
-					<label>Preset</label>
-					<div class="field-input">
-						<select v-model="selectedPreset" v-on:change="applyPreset" :disabled="running">
-							<option :value="null">--</option>
-							<optgroup v-for="group in presetGroups" :key="group.label" :label="group.label">
-								<option v-for="p in group.presets" :key="p.name" :value="p.name">{{p.name}} (BW={{p.stop
-									- p.start}}MHz)</option>
-							</optgroup>
-						</select>
-					</div>
-				</div>
-				<div class="field">
-					<label>Start Frequency</label>
-					<div class="field-input">
-						<input v-model.number="range.start" type="number" step="1" min="1" max="6000" required
-							:disabled="running">
-						<span class="field-suffix">MHz</span>
-					</div>
-				</div>
-				<div class="field">
-					<label>End Frequency</label>
-					<div class="field-input">
-						<input v-model.number="range.stop" type="number" step="1" min="1" max="6000" required
-							:disabled="running">
-						<span class="field-suffix">MHz</span>
-					</div>
-				</div>
-				<div class="field">
-					<label>FFT Size</label>
-					<div class="field-input">
-						<select v-model.number="range.fftSize" :disabled="running">
-							<option value="8">8</option>
-							<option value="16">16</option>
-							<option value="32">32</option>
-							<option value="64">64</option>
-							<option value="128">128</option>
-							<option value="256">256</option>
-							<option value="512">512</option>
-							<option value="1024">1024</option>
-							<option value="2048">2048</option>
-							<option value="4096">4096</option>
-							<option value="8192">8192</option>
-						</select>
-					</div>
-				</div>
-				<div class="divider"></div>
-				<div class="field">
-					<label>LNA Gain (IF)</label>
-					<div class="field-input">
-						<input v-model.number="options.lnaGain" type="range" step="8" max="40" min="0"
-							class="field-range">
-						<input v-model.number="options.lnaGain" type="number" step="8" max="40" min="0" required
-							class="field-number">
-						<span class="field-suffix">dB</span>
-					</div>
-				</div>
-				<div class="field">
-					<label>VGA Gain (Baseband)</label>
-					<div class="field-input">
-						<input v-model.number="options.vgaGain" type="range" step="2" max="62" min="0"
-							class="field-range">
-						<input v-model.number="options.vgaGain" type="number" step="2" max="62" min="0" required
-							class="field-number">
-						<span class="field-suffix">dB</span>
-					</div>
-				</div>
-				<label class="checkbox">
-					<input type="checkbox" v-model="options.ampEnabled">
-					RF Amp (14dB)
-				</label>
-				<label class="checkbox">
-					<input type="checkbox" v-model="options.antennaEnabled">
-					Antenna Port Power
-				</label>
-				<label class="checkbox">
-					<input type="checkbox" v-model="options.peakHold">
-					Peak Hold
-				</label>
-				<div class="divider"></div>
-				<div class="section-title">Audio Receiver</div>
-				<div class="field">
-					<label>Tune Frequency</label>
-					<div class="field-input">
-						<input v-model.number="audio.frequency" type="number" step="0.001"
-							placeholder="Click spectrum" :disabled="audio.listening">
-						<span class="field-suffix">MHz</span>
-					</div>
-					<div class="caption" v-if="audio.frequency === null">Click on the spectrum to select</div>
-				</div>
-				<div class="field">
-					<label>Demodulation</label>
-					<div class="field-input">
-						<select v-model="audio.mode" :disabled="audio.listening">
-							<option value="wbfm">FM Broadcast (WBFM)</option>
-							<option value="nbfm">Narrowband FM</option>
-							<option value="am">AM</option>
-						</select>
-					</div>
-				</div>
-				<div class="field">
-					<label>Volume</label>
-					<div class="field-input">
-						<input v-model.number="audio.volume" type="range" min="0" max="100" step="1"
-							class="field-range">
-						<input v-model.number="audio.volume" type="number" min="0" max="100" step="1"
-							class="field-number">
-						<span class="field-suffix">%</span>
-					</div>
-				</div>
-				<div style="margin-top: 8px">
-					<button class="btn btn-listen" v-on:click="listen" v-if="!audio.listening"
-						:disabled="audio.frequency === null || !connected">Listen</button>
-					<button class="btn btn-stop-listen" v-on:click="stopListening"
-						v-if="audio.listening">Stop Listening</button>
-					<button class="btn" v-on:click="testTone" style="margin-left: 8px"
-						v-if="!audio.listening">Test Tone</button>
-				</div>
-				<div class="audio-status" v-if="audio.listening">
-					<span class="pulse"></span>
-					Listening to {{ audio.frequency }} MHz
-					<span class="audio-bw">(±1.2 MHz view)</span>
-				</div>
-			</div>
-			<div class="body-2">
-				{{ info.boardName }} (id:{{ info.boardId }})<br>
-				{{ info.firmwareVersion }}
-			</div>
-			<div class="info-link" v-on:click="openAbout">
-				[About]
-			</div>
-
-			<!-- Snackbar -->
-			<div class="snackbar" :class="{ show: snackbar.show }">
-				{{ snackbar.message }}
-			</div>
-
-			<!-- Alert Dialog -->
-			<div class="dialog-overlay" v-if="alert.show" v-on:click.self="alert.show = false">
-				<div class="dialog">
-					<div class="dialog-header">
-						<h3 class="dialog-title">{{ alert.title }}</h3>
-					</div>
-					<div class="dialog-body">
-						{{ alert.content }}
-					</div>
-					<div class="dialog-footer">
-						<button class="btn" v-on:click="alert.show = false">Close</button>
-					</div>
-				</div>
-			</div>
-
-			<!-- About Dialog -->
-			<dialog ref="aboutDialog">
-				<h3>About</h3>
-				<div class="dialog-content">
-					<p>HackRF Sweep WebUSB</p>
-					<p>Repo: <a href="https://github.com/cho45/hackrf-sweep-webusb"
-							target="_blank">github.com/cho45/hackrf-sweep-webusb</a></p>
-					<p>Author: <a href="https://www.lowreal.net">cho45 &lt;cho45@lowreal.net&gt;</a></p>
-					<div class="subheading">Links</div>
-					<ul>
-						<li><a href="https://greatscottgadgets.com/hackrf/" target="_blank">HackRF</a> (<a
-								href="https://github.com/mossmann/hackrf/" target="_blank">github</a>)</li>
-					</ul>
-				</div>
-				<div class="dialog-footer">
-					<button class="btn btn-primary" v-on:click="closeAbout">Close</button>
-				</div>
-			</dialog>
-		</div>
-		<div class="canvas-container">
-			<div style="width: 100%; height: 70vh; position: relative">
-				<canvas id="waterfall" ref="waterfall"></canvas>
-			</div>
-			<div style="width: 100%; height: 30vh; position: relative">
-				<canvas id="fft" ref="fft"></canvas>
-				<div class="axis" style="left: 0% ">{{labelFor(0)}}</div>
-				<div class="axis" style="left: 25% ">{{labelFor(0.25)}}</div>
-				<div class="axis" style="left: 50% ">{{labelFor(0.5)}}</div>
-				<div class="axis" style="left: 75%">{{labelFor(0.75)}}</div>
-				<div class="axis right" style="right: 0%">{{labelFor(1)}}</div>
-				<div class="axis" ref="currentHover" style="top: 20px; left: 75%">{{currentHover}}</div>
-				<button class="btn btn-tiny btn-reset-peak" v-if="options.peakHold" v-on:click="resetPeak">Reset
-					Peak</button>
+			<div class="top-controls">
+				<button class="icon-btn" @click="togglePlay" :class="{ active: running }" :disabled="!connected">
+					<svg v-if="!running" viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
+					<svg v-else viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+				</button>
 			</div>
 		</div>
+
+		<div class="main-layout">
+			<!-- Sidebar -->
+			<div class="sidebar">
+				<div class="panel">
+					<div class="panel-header">Source</div>
+					<div class="panel-body">
+						<div class="form-row">
+							<button class="btn btn-primary" v-if="!connected" @click="connect">Connect Device</button>
+							<button class="btn" v-else @click="disconnect">Disconnect</button>
+						</div>
+						<div class="form-row info-row" v-if="connected">
+							<small>{{ info.boardName }}</small>
+						</div>
+					</div>
+				</div>
+
+				<div class="panel" :class="{ disabled: !connected }">
+					<div class="panel-header">Radio</div>
+					<div class="panel-body">
+						<div class="form-row">
+							<label>Center</label>
+							<div class="input-group">
+								<input type="number" v-model.number="radio.centerFreq" step="0.1" title="Center Frequency (MHz)">
+								<span>MHz</span>
+							</div>
+						</div>
+						<div class="form-row">
+							<label>Bandwidth</label>
+							<select v-model.number="radio.sampleRate">
+								<option value="2000000">2 MSPS</option>
+								<option value="4000000">4 MSPS</option>
+								<option value="8000000">8 MSPS</option>
+								<option value="10000000">10 MSPS</option>
+								<option value="16000000">16 MSPS</option>
+								<option value="20000000">20 MSPS</option>
+							</select>
+						</div>
+						<div class="form-row">
+							<label>LNA Gain</label>
+							<div class="slider-group">
+								<input type="range" v-model.number="gains.lna" min="0" max="40" step="8">
+								<span class="val">{{ gains.lna }}dB</span>
+							</div>
+						</div>
+						<div class="form-row">
+							<label>VGA Gain</label>
+							<div class="slider-group">
+								<input type="range" v-model.number="gains.vga" min="0" max="62" step="2">
+								<span class="val">{{ gains.vga }}dB</span>
+							</div>
+						</div>
+						<div class="form-row">
+							<label class="checkbox">
+								<input type="checkbox" v-model="gains.ampEnabled"> Amp (14dB)
+							</label>
+						</div>
+					</div>
+				</div>
+
+				<div class="panel" :class="{ disabled: !connected }">
+					<div class="panel-header">Audio VFO</div>
+					<div class="panel-body">
+						<div class="form-row">
+							<label>Status</label>
+							<button class="btn btn-listen" :class="{ active: audio.enabled }" @click="toggleAudio" :disabled="!running">
+								{{ audio.enabled ? 'Mute' : 'Listen' }}
+							</button>
+						</div>
+						<div class="form-row">
+							<label>Tuned</label>
+							<div class="input-group">
+								<input type="number" v-model.number="audio.freq" step="0.001">
+								<span>MHz</span>
+							</div>
+						</div>
+						<div class="form-row">
+							<label>Mode</label>
+							<select v-model="audio.mode">
+								<option value="wbfm">WBFM</option>
+								<option value="nbfm">NBFM</option>
+								<option value="am">AM</option>
+							</select>
+						</div>
+						<div class="form-row">
+							<label>Volume</label>
+							<div class="slider-group">
+								<input type="range" v-model.number="audio.volume" min="0" max="100" step="1">
+								<span class="val">{{ audio.volume }}%</span>
+							</div>
+						</div>
+					</div>
+				</div>
+			</div>
+
+			<!-- Canvas Area -->
+			<div class="workspace">
+				<div class="fft-container" ref="fftContainer">
+					<canvas id="fft" ref="fft"></canvas>
+					<!-- Canvas Overlay lines -->
+					<div class="freq-axis">
+						<div class="tick" style="left: 0%">{{ labelFreq(0) }}</div>
+						<div class="tick" style="left: 25%">{{ labelFreq(0.25) }}</div>
+						<div class="tick" style="left: 50%">{{ labelFreq(0.5) }}</div>
+						<div class="tick" style="left: 75%">{{ labelFreq(0.75) }}</div>
+						<div class="tick" style="right: 0px">{{ labelFreq(1) }}</div>
+					</div>
+					<div class="hover-tick" ref="hoverTick" style="display: none">{{ hoverFreqText }}</div>
+				</div>
+				<div class="waterfall-container">
+					<canvas id="waterfall" ref="waterfall"></canvas>
+				</div>
+			</div>
+		</div>
+
+		<!-- Dialogs -->
+		<div class="snackbar" :class="{ show: snackbar.show }">{{ snackbar.message }}</div>
 	</div>
 </body>
-
 </html>

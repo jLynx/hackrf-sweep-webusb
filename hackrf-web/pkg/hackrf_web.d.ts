@@ -1,6 +1,21 @@
 /* tslint:disable */
 /* eslint-disable */
 
+export class DspProcessor {
+    free(): void;
+    [Symbol.dispose](): void;
+    constructor(sample_rate: number, shift_hz: number, decimation: number);
+    /**
+     * Process raw i8 IQ samples, applying NCO shift and CIC decimation.
+     * Returns the number of f32 samples written to `output`.
+     * `input` is pairs of i8 (I, Q).
+     * `output` is pairs of f32 (I, Q) and must be large enough. (input.len() / decimation)
+     */
+    process(input: Int8Array, output: Float32Array): number;
+    set_decimation(decimation: number): void;
+    set_shift(sample_rate: number, shift_hz: number): void;
+}
+
 export class FFT {
     free(): void;
     [Symbol.dispose](): void;
@@ -59,7 +74,12 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly __wbg_dspprocessor_free: (a: number, b: number) => void;
     readonly __wbg_fft_free: (a: number, b: number) => void;
+    readonly dspprocessor_new: (a: number, b: number, c: number) => number;
+    readonly dspprocessor_process: (a: number, b: number, c: number, d: number, e: number, f: any) => number;
+    readonly dspprocessor_set_decimation: (a: number, b: number) => void;
+    readonly dspprocessor_set_shift: (a: number, b: number, c: number) => void;
     readonly fft_fft: (a: number, b: number, c: number, d: number, e: number, f: any) => void;
     readonly fft_new: (a: number, b: number, c: number) => number;
     readonly fft_set_smoothing_time_constant: (a: number, b: number) => void;

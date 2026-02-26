@@ -1,5 +1,60 @@
 /* @ts-self-types="./hackrf_web.d.ts" */
 
+export class DspProcessor {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        DspProcessorFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_dspprocessor_free(ptr, 0);
+    }
+    /**
+     * @param {number} sample_rate
+     * @param {number} shift_hz
+     * @param {number} decimation
+     */
+    constructor(sample_rate, shift_hz, decimation) {
+        const ret = wasm.dspprocessor_new(sample_rate, shift_hz, decimation);
+        this.__wbg_ptr = ret >>> 0;
+        DspProcessorFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * Process raw i8 IQ samples, applying NCO shift and CIC decimation.
+     * Returns the number of f32 samples written to `output`.
+     * `input` is pairs of i8 (I, Q).
+     * `output` is pairs of f32 (I, Q) and must be large enough. (input.len() / decimation)
+     * @param {Int8Array} input
+     * @param {Float32Array} output
+     * @returns {number}
+     */
+    process(input, output) {
+        const ptr0 = passArray8ToWasm0(input, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        var ptr1 = passArrayF32ToWasm0(output, wasm.__wbindgen_malloc);
+        var len1 = WASM_VECTOR_LEN;
+        const ret = wasm.dspprocessor_process(this.__wbg_ptr, ptr0, len0, ptr1, len1, output);
+        return ret >>> 0;
+    }
+    /**
+     * @param {number} decimation
+     */
+    set_decimation(decimation) {
+        wasm.dspprocessor_set_decimation(this.__wbg_ptr, decimation);
+    }
+    /**
+     * @param {number} sample_rate
+     * @param {number} shift_hz
+     */
+    set_shift(sample_rate, shift_hz) {
+        wasm.dspprocessor_set_shift(this.__wbg_ptr, sample_rate, shift_hz);
+    }
+}
+if (Symbol.dispose) DspProcessor.prototype[Symbol.dispose] = DspProcessor.prototype.free;
+
 export class FFT {
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
@@ -134,6 +189,9 @@ function __wbg_get_imports() {
     };
 }
 
+const DspProcessorFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_dspprocessor_free(ptr >>> 0, 1));
 const FFTFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_fft_free(ptr >>> 0, 1));

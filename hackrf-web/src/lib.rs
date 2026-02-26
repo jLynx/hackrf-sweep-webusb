@@ -161,6 +161,105 @@ impl FFT {
 }
 
 // ============================================================================
+// DspProcessor for NCO & Decimation
+// ============================================================================
+
+#[wasm_bindgen]
+pub struct DspProcessor {
+    phase: f32,
+    phase_inc: f32,
+    decimation: usize,
+    sum_i: f32,
+    sum_q: f32,
+    count: usize,
+}
+
+#[wasm_bindgen]
+impl DspProcessor {
+    #[wasm_bindgen(constructor)]
+    pub fn new(sample_rate: f32, shift_hz: f32, decimation: usize) -> Self {
+        let phase_inc = 2.0 * std::f32::consts::PI * shift_hz / sample_rate;
+        DspProcessor {
+            phase: 0.0,
+            phase_inc,
+            decimation,
+            sum_i: 0.0,
+            sum_q: 0.0,
+            count: 0,
+        }
+    }
+
+    pub fn set_shift(&mut self, sample_rate: f32, shift_hz: f32) {
+        self.phase_inc = 2.0 * std::f32::consts::PI * shift_hz / sample_rate;
+    }
+
+    pub fn set_decimation(&mut self, decimation: usize) {
+        self.decimation = decimation;
+        self.count = 0;
+        self.sum_i = 0.0;
+        self.sum_q = 0.0;
+    }
+
+    /// Process raw i8 IQ samples, applying NCO shift and CIC decimation.
+    /// Returns the number of f32 samples written to `output`.
+    /// `input` is pairs of i8 (I, Q).
+    /// `output` is pairs of f32 (I, Q) and must be large enough. (input.len() / decimation)
+    pub fn process(&mut self, input: &[i8], output: &mut [f32]) -> usize {
+        let mut out_idx = 0;
+        let mut count = self.count;
+        let mut sum_i = self.sum_i;
+        let mut sum_q = self.sum_q;
+        let mut phase = self.phase;
+        let decimation = self.decimation;
+        let phase_inc = self.phase_inc;
+        let pi2 = 2.0 * std::f32::consts::PI;
+
+        // processing 2 bytes at a time (I, Q)
+        let exact_len = input.len() / 2 * 2;
+        let mut i = 0;
+        while i < exact_len {
+            let i_val = input[i] as f32 / 128.0;
+            let q_val = input[i + 1] as f32 / 128.0;
+
+            let cos_p = phase.cos();
+            let sin_p = phase.sin();
+            let shifted_i = i_val * cos_p - q_val * sin_p;
+            let shifted_q = i_val * sin_p + q_val * cos_p;
+
+            phase += phase_inc;
+            if phase > pi2 {
+                phase -= pi2;
+            } else if phase < -pi2 {
+                phase += pi2;
+            }
+
+            sum_i += shifted_i;
+            sum_q += shifted_q;
+            count += 1;
+
+            if count >= decimation {
+                if out_idx + 1 < output.len() {
+                    output[out_idx] = sum_i / decimation as f32;
+                    output[out_idx + 1] = sum_q / decimation as f32;
+                    out_idx += 2;
+                }
+                sum_i = 0.0;
+                sum_q = 0.0;
+                count = 0;
+            }
+            i += 2;
+        }
+
+        self.phase = phase;
+        self.sum_i = sum_i;
+        self.sum_q = sum_q;
+        self.count = count;
+
+        out_idx
+    }
+}
+
+// ============================================================================
 // Rust Native Tests
 // ============================================================================
 #[cfg(test)]
