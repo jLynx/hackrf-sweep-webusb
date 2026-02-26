@@ -136,7 +136,7 @@ class Worker {
 		if (decimation < 1) decimation = 1;
 		const actualDemodRate = sampleRate / decimation;
 
-		this.audioParams = { freq: centerFreq, mode: 'wfm', enabled: false, deEmphasis: '50us', squelchEnabled: false, squelchLevel: -100.0, lowPass: true, bandwidth: 150000 };
+		this.audioParams = { freq: centerFreq, mode: 'wfm', enabled: false, deEmphasis: '50us', squelchEnabled: false, squelchLevel: -100.0, lowPass: true, highPass: false, bandwidth: 150000 };
 		// Initialize the Rust NCO/Decimator
 		if (this.ddc) {
 			this.ddc.free();
@@ -146,14 +146,32 @@ class Worker {
 		const maxDdcOut = Math.ceil(131072 / decimation) * 2;
 		const ddcOutput = new Float32Array(maxDdcOut);
 
-		// ── Audio Demodulator setup ───────────────────────────────────
+		// ── Audio Demodulator setup (matching SDR++ radio_module.h) ───
 		const state = {
-			prevI: 0, prevQ: 0,
+			// FM demod state
+			prevPhase: 0,
+			// AM demod state
 			dcAvg: 0,
-			audioDecimSum: 0, audioDecimCount: 0,
+			carrierAgcGain: 1.0,
+			// Audio decimation
+			audioDecimSum: 0,
+			audioDecimCount: 0,
+			// De-emphasis (SDR++ style: y = alpha*x + (1-alpha)*y_prev)
 			deemphPrev: 0,
+			// Low pass FIR state (simple IIR approximation for browser)
 			lpPrev: 0,
-			agcGain: 0,
+			// High pass state (for NFM)
+			hpPrev: 0,
+			hpPrevIn: 0,
+			// AGC state (SDR++ loop::AGC style)
+			agcGain: 1.0,
+			// SSB/CW frequency translator state
+			ssbPhase: 0,
+			// CW tone
+			cwTone: 700,
+			// FM IF Noise Reduction state
+			ifnrEnabled: false,
+			// Block count
 			chunkCount: 0,
 		};
 
@@ -195,18 +213,19 @@ class Worker {
 				const numDemodSamples = numOutParams / 2;
 				if (numDemodSamples === 0) return;
 
-				// Squelch Calculation
-				let iqPower = 0;
+				// ── Squelch (SDR++ style: average magnitude in dB) ────────
+				// SDR++ squelch.h: compute avg magnitude, 10*log10(avg_mag), compare to level
+				let squelchMag = 0;
 				for (let i = 0; i < numDemodSamples; i++) {
 					const dI = ddcOutput[i * 2];
 					const dQ = ddcOutput[i * 2 + 1];
-					iqPower += (dI * dI + dQ * dQ);
+					squelchMag += Math.sqrt(dI * dI + dQ * dQ);
 				}
-				iqPower /= numDemodSamples;
-				const iqPowerDb = 10 * Math.log10(iqPower + 1e-12);
+				squelchMag /= numDemodSamples;
+				const squelchDb = 10 * Math.log10(squelchMag + 1e-12);
 
-				if (this.audioParams.squelchEnabled && iqPowerDb < this.audioParams.squelchLevel) {
-					// Muted by squelch
+				if (this.audioParams.squelchEnabled && squelchDb < this.audioParams.squelchLevel) {
+					// Muted by squelch - SDR++ zeros the entire block
 					const zeros = new Float32Array(Math.ceil(numDemodSamples / audioDecimation) + 2);
 					let zeroIdx = 0;
 					for (let i = 0; i < numDemodSamples; i++) {
@@ -224,31 +243,161 @@ class Worker {
 				const audioSamples = new Float32Array(maxAudioSamples);
 				let audioIdx = 0;
 
+				const mode = this.audioParams.mode;
+				const bw = this.audioParams.bandwidth || 150000;
+
 				for (let i = 0; i < numDemodSamples; i++) {
 					const dI = ddcOutput[i * 2];
 					const dQ = ddcOutput[i * 2 + 1];
 
 					let demodSample;
-					if (this.audioParams.mode === 'am') {
+
+					if (mode === 'wfm' || mode === 'nfm') {
+						// ── FM Demod (SDR++ quadrature.h) ─────────────────
+						// phase = atan2(Q, I)
+						// out = normalizePhase(phase - prevPhase) * invDeviation
+						// invDeviation = 1 / hzToRads(bw/2, actualDemodRate)
+						// hzToRads(freq, sr) = (freq / sr) * 2 * PI
+						const phase = Math.atan2(dQ, dI);
+						let phaseDiff = phase - state.prevPhase;
+						// Normalize phase to [-PI, PI]
+						while (phaseDiff > Math.PI) phaseDiff -= 2 * Math.PI;
+						while (phaseDiff < -Math.PI) phaseDiff += 2 * Math.PI;
+
+						const deviation = (bw / 2.0) / actualDemodRate * 2 * Math.PI;
+						const invDeviation = 1.0 / deviation;
+						demodSample = phaseDiff * invDeviation;
+
+						state.prevPhase = phase;
+					}
+					else if (mode === 'am') {
+						// ── AM Demod (SDR++ am.h) ─────────────────────────
+						// Envelope detection: magnitude of IQ
+						// DC blocking
+						// AGC with attack/decay
 						const mag = Math.sqrt(dI * dI + dQ * dQ);
-						state.dcAvg = state.dcAvg * 0.999 + mag * 0.001;
-						demodSample = (mag - state.dcAvg) * 5.0;
-					} else if (this.audioParams.mode === 'usb' || this.audioParams.mode === 'lsb' || this.audioParams.mode === 'cw') {
-						demodSample = dI * 5.0; // Basic SSB/CW demodulation
-					} else if (this.audioParams.mode === 'raw') {
-						demodSample = dI;
-					} else { // FM modes
-						const conjI = dI * state.prevI + dQ * state.prevQ;
-						const conjQ = dQ * state.prevI - dI * state.prevQ;
-						demodSample = Math.atan2(conjQ, conjI);
-						if (this.audioParams.mode === 'nfm') {
-							demodSample *= 5.0 / Math.PI;
+
+						// DC Blocker (SDR++ correction::DCBlocker)
+						// Simple IIR DC blocker: y = x - prevX + 0.9999 * prevY
+						const dcAlpha = 0.9999;
+						state.dcAvg = dcAlpha * state.dcAvg + (1 - dcAlpha) * mag;
+						demodSample = mag - state.dcAvg;
+
+						// Audio-mode AGC (attack=50/15000, decay=5/15000 default)
+						const agcAttack = 50.0 / 15000.0;
+						const agcDecay = 5.0 / 15000.0;
+						const absSample = Math.abs(demodSample);
+						if (absSample > state.agcGain) {
+							state.agcGain = state.agcGain * (1 - agcAttack) + absSample * agcAttack;
 						} else {
-							demodSample /= Math.PI;
+							state.agcGain = state.agcGain * (1 - agcDecay) + absSample * agcDecay;
+						}
+						const agcScale = state.agcGain > 1e-6 ? (0.5 / state.agcGain) : 1.0;
+						demodSample *= agcScale;
+					}
+					else if (mode === 'usb' || mode === 'lsb' || mode === 'dsb') {
+						// ── SSB Demod (SDR++ ssb.h) ───────────────────────
+						// Frequency translate by +bw/2 (USB), -bw/2 (LSB), 0 (DSB)
+						// Then take real part, then AGC
+						let shiftFreq = 0;
+						if (mode === 'usb') shiftFreq = bw / 2.0;
+						else if (mode === 'lsb') shiftFreq = -bw / 2.0;
+						// else DSB: shiftFreq = 0
+
+						const phaseInc = (shiftFreq / actualDemodRate) * 2 * Math.PI;
+						state.ssbPhase += phaseInc;
+						// Keep phase bounded
+						if (state.ssbPhase > Math.PI) state.ssbPhase -= 2 * Math.PI;
+						if (state.ssbPhase < -Math.PI) state.ssbPhase += 2 * Math.PI;
+
+						// Complex multiply: (dI + j*dQ) * (cos(phase) + j*sin(phase))
+						const cosP = Math.cos(state.ssbPhase);
+						const sinP = Math.sin(state.ssbPhase);
+						const rI = dI * cosP - dQ * sinP;
+						// Take real part only
+						demodSample = rI;
+
+						// AGC (attack=50/24000, decay=5/24000 default for SSB)
+						const agcAttack = 50.0 / 24000.0;
+						const agcDecay = 5.0 / 24000.0;
+						const absSample = Math.abs(demodSample);
+						if (absSample > state.agcGain) {
+							state.agcGain = state.agcGain * (1 - agcAttack) + absSample * agcAttack;
+						} else {
+							state.agcGain = state.agcGain * (1 - agcDecay) + absSample * agcDecay;
+						}
+						const agcScale = state.agcGain > 1e-6 ? (0.5 / state.agcGain) : 1.0;
+						demodSample *= agcScale;
+					}
+					else if (mode === 'cw') {
+						// ── CW Demod (SDR++ cw.h) ─────────────────────────
+						// Frequency translate by CW tone (default 700Hz) to produce audible beat
+						// Then take real part, then AGC
+						const cwTone = state.cwTone || 700;
+						const phaseInc = (cwTone / actualDemodRate) * 2 * Math.PI;
+						state.ssbPhase += phaseInc;
+						if (state.ssbPhase > Math.PI) state.ssbPhase -= 2 * Math.PI;
+						if (state.ssbPhase < -Math.PI) state.ssbPhase += 2 * Math.PI;
+
+						const cosP = Math.cos(state.ssbPhase);
+						const sinP = Math.sin(state.ssbPhase);
+						const rI = dI * cosP - dQ * sinP;
+						demodSample = rI;
+
+						// AGC (attack=50/3000, decay=5/3000 for CW IF rate)
+						const agcAttack = 50.0 / 3000.0;
+						const agcDecay = 5.0 / 3000.0;
+						const absSample = Math.abs(demodSample);
+						if (absSample > state.agcGain) {
+							state.agcGain = state.agcGain * (1 - agcAttack) + absSample * agcAttack;
+						} else {
+							state.agcGain = state.agcGain * (1 - agcDecay) + absSample * agcDecay;
+						}
+						const agcScale = state.agcGain > 1e-6 ? (0.5 / state.agcGain) : 1.0;
+						demodSample *= agcScale;
+					}
+					else if (mode === 'raw') {
+						// ── RAW Mode (SDR++ raw.h) ────────────────────────
+						// Complex to stereo pass-through (just take I component for mono)
+						demodSample = dI;
+					}
+					else {
+						demodSample = 0;
+					}
+
+					// ── NFM Low/High Pass Filter (SDR++ fm.h) ────────────
+					// SDR++ NFM uses FIR filters, we approximate with IIR
+					if (mode === 'nfm') {
+						// Low pass: bandwidth/2 cutoff
+						if (this.audioParams.lowPass) {
+							const cutoff = bw / 2.0;
+							const dt_lp = 1.0 / actualDemodRate;
+							const RC_lp = 1.0 / (2.0 * Math.PI * cutoff);
+							const alpha_lp = dt_lp / (RC_lp + dt_lp);
+							state.lpPrev = alpha_lp * demodSample + (1 - alpha_lp) * state.lpPrev;
+							demodSample = state.lpPrev;
+						}
+						// High pass: 300Hz cutoff (SDR++ uses 300Hz for voice high pass)
+						if (this.audioParams.highPass) {
+							const dt_hp = 1.0 / actualDemodRate;
+							const RC_hp = 1.0 / (2.0 * Math.PI * 300.0);
+							const alpha_hp = RC_hp / (RC_hp + dt_hp);
+							const out_hp = alpha_hp * (state.hpPrev + demodSample - state.hpPrevIn);
+							state.hpPrevIn = demodSample;
+							state.hpPrev = out_hp;
+							demodSample = out_hp;
 						}
 					}
-					state.prevI = dI;
-					state.prevQ = dQ;
+
+					// ── WFM Low Pass Filter (SDR++ broadcast_fm.h) ───────
+					// SDR++ WFM uses 15kHz audio LPF
+					if (mode === 'wfm' && this.audioParams.lowPass) {
+						const dt_lp = 1.0 / actualDemodRate;
+						const RC_lp = 1.0 / (2.0 * Math.PI * 15000.0);
+						const alpha_lp = dt_lp / (RC_lp + dt_lp);
+						state.lpPrev = alpha_lp * demodSample + (1 - alpha_lp) * state.lpPrev;
+						demodSample = state.lpPrev;
+					}
 
 					state.audioDecimSum += demodSample;
 					state.audioDecimCount++;
@@ -264,43 +413,51 @@ class Worker {
 
 				const result = audioSamples.slice(0, audioIdx);
 
-				// De-emphasis
-				if ((this.audioParams.mode === 'wfm' || this.audioParams.mode === 'nfm') && this.audioParams.deEmphasis !== 'none' && result.length > 0) {
+				// ── De-emphasis (SDR++ filter/deephasis.h) ────────────────
+				// Only for FM modes (NFM and WFM) per SDR++
+				// SDR++ formula: alpha = dt / (tau + dt), y = alpha*x + (1-alpha)*y_prev
+				if ((mode === 'wfm' || mode === 'nfm') && this.audioParams.deEmphasis !== 'none' && result.length > 0) {
 					const dt = 1.0 / AUDIO_RATE;
-					const RC = this.audioParams.deEmphasis === '50us' ? 50e-6 : 75e-6;
-					const alpha = Math.exp(-dt / RC);
+					let tau;
+					switch (this.audioParams.deEmphasis) {
+						case '22us': tau = 22e-6; break;
+						case '50us': tau = 50e-6; break;
+						case '75us': tau = 75e-6; break;
+						default: tau = 50e-6; break;
+					}
+					const alpha = dt / (tau + dt);
 					for (let i = 0; i < result.length; i++) {
-						state.deemphPrev = alpha * state.deemphPrev + (1 - alpha) * result[i];
+						state.deemphPrev = alpha * result[i] + (1 - alpha) * state.deemphPrev;
 						result[i] = state.deemphPrev;
 					}
 				}
 
-				// Low Pass Filter (simple RC lowpass ~ 3.4kHz for voice if enabled)
-				if (this.audioParams.lowPass && result.length > 0) {
-					const dt = 1.0 / AUDIO_RATE;
-					const RC_LP = 1.0 / (2.0 * Math.PI * 3400); // 3.4kHz cutoff
-					const alphaLp = Math.exp(-dt / RC_LP);
+				// ── Output level normalization ────────────────────────────
+				// For non-AGC modes (FM, RAW), apply simple RMS-based AGC
+				if (mode === 'wfm' || mode === 'nfm' || mode === 'raw') {
+					let rms = 0;
+					for (let i = 0; i < result.length; i++) rms += result[i] * result[i];
+					rms = Math.sqrt(rms / result.length);
+
+					const targetRMS = 0.15;
+					const desiredGain = rms > 1e-6 ? targetRMS / rms : 1000;
+					const clampedGain = Math.min(desiredGain, 5000);
+
+					if (!state.outputGain) state.outputGain = clampedGain;
+					state.outputGain = state.outputGain * 0.95 + clampedGain * 0.05;
+
 					for (let i = 0; i < result.length; i++) {
-						state.lpPrev = alphaLp * state.lpPrev + (1 - alphaLp) * result[i];
-						result[i] = state.lpPrev;
+						result[i] *= state.outputGain;
+						if (result[i] > 1.0) result[i] = 1.0;
+						else if (result[i] < -1.0) result[i] = -1.0;
 					}
-				}
-
-				let rms = 0;
-				for (let i = 0; i < result.length; i++) rms += result[i] * result[i];
-				rms = Math.sqrt(rms / result.length);
-
-				const targetRMS = 0.15;
-				const desiredGain = rms > 1e-6 ? targetRMS / rms : 1000;
-				const clampedGain = Math.min(desiredGain, 5000);
-
-				if (!state.agcGain) state.agcGain = clampedGain;
-				state.agcGain = state.agcGain * 0.95 + clampedGain * 0.05;
-
-				for (let i = 0; i < result.length; i++) {
-					result[i] *= state.agcGain;
-					if (result[i] > 1.0) result[i] = 1.0;
-					else if (result[i] < -1.0) result[i] = -1.0;
+				} else {
+					// AM, SSB, CW already have per-sample AGC from demod
+					// Just hard-clip
+					for (let i = 0; i < result.length; i++) {
+						if (result[i] > 1.0) result[i] = 1.0;
+						else if (result[i] < -1.0) result[i] = -1.0;
+					}
 				}
 
 				audioCallback(result);

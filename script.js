@@ -34,6 +34,9 @@ createApp({
 				noiseReduction: false,
 				stereo: false,
 				lowPass: true,
+				highPass: false,
+				rds: false,
+				rdsRegion: 'eu',
 				volume: 50,
 			},
 			vfoDisplayFreq: "100.000000",
@@ -320,7 +323,10 @@ createApp({
 					squelchLevel: this.audio.squelchLevel,
 					noiseReduction: this.audio.noiseReduction,
 					stereo: this.audio.stereo,
-					lowPass: this.audio.lowPass
+					lowPass: this.audio.lowPass,
+					highPass: this.audio.highPass,
+					rds: this.audio.rds,
+					rdsRegion: this.audio.rdsRegion,
 				});
 			}
 		},
@@ -424,44 +430,95 @@ createApp({
 			if (newMode === oldMode) return; // Ignore init or identical calls
 
 			// Apply defaults for the specific mode based on SDR++
+			// Apply SDR++ defaults for each demodulator mode
 			switch (newMode) {
 				case 'wfm':
 					this.audio.bandwidth = 150000;
 					this.audio.snapInterval = 100000;
 					this.audio.deEmphasis = '50us';
-					this.audio.stereo = false; // SDR++ UI doesn't explicitly force stereo for WFM by default, but it's an option.
+					this.audio.squelchEnabled = false;
+					this.audio.squelchLevel = -100.0;
+					this.audio.noiseReduction = false;
+					this.audio.stereo = false;
 					this.audio.lowPass = true;
+					this.audio.highPass = false;
 					break;
 				case 'nfm':
 					this.audio.bandwidth = 12500;
 					this.audio.snapInterval = 2500;
 					this.audio.deEmphasis = 'none';
+					this.audio.squelchEnabled = false;
+					this.audio.squelchLevel = -100.0;
+					this.audio.noiseReduction = false;
 					this.audio.stereo = false;
 					this.audio.lowPass = true;
+					this.audio.highPass = false;
 					break;
 				case 'am':
 					this.audio.bandwidth = 10000;
 					this.audio.snapInterval = 1000;
 					this.audio.deEmphasis = 'none';
+					this.audio.squelchEnabled = false;
+					this.audio.squelchLevel = -100.0;
+					this.audio.noiseReduction = false;
 					this.audio.stereo = false;
-					this.audio.lowPass = true; // Typical for voice AM
+					this.audio.lowPass = false;
+					this.audio.highPass = false;
 					break;
 				case 'usb':
-				case 'lsb':
-				case 'cw':
-					this.audio.bandwidth = 2800; // Actually CW usually uses tighter (e.g. 500Hz), but USB/LSB is 2800
-					if (newMode === 'cw') this.audio.bandwidth = 500;
+					this.audio.bandwidth = 2800;
 					this.audio.snapInterval = 100;
 					this.audio.deEmphasis = 'none';
+					this.audio.squelchEnabled = false;
+					this.audio.squelchLevel = -100.0;
+					this.audio.noiseReduction = false;
 					this.audio.stereo = false;
-					this.audio.lowPass = false; // SDR++ SSB usually relies purely on the bandpass filter, but wait, screenshot shows lowpass off for SSB.
+					this.audio.lowPass = false;
+					this.audio.highPass = false;
+					break;
+				case 'lsb':
+					this.audio.bandwidth = 2800;
+					this.audio.snapInterval = 100;
+					this.audio.deEmphasis = 'none';
+					this.audio.squelchEnabled = false;
+					this.audio.squelchLevel = -100.0;
+					this.audio.noiseReduction = false;
+					this.audio.stereo = false;
+					this.audio.lowPass = false;
+					this.audio.highPass = false;
 					break;
 				case 'dsb':
-				case 'raw':
 					this.audio.bandwidth = 4600;
 					this.audio.snapInterval = 100;
 					this.audio.deEmphasis = 'none';
+					this.audio.squelchEnabled = false;
+					this.audio.squelchLevel = -100.0;
+					this.audio.noiseReduction = false;
 					this.audio.stereo = false;
+					this.audio.lowPass = false;
+					this.audio.highPass = false;
+					break;
+				case 'cw':
+					this.audio.bandwidth = 200;
+					this.audio.snapInterval = 10;
+					this.audio.deEmphasis = 'none';
+					this.audio.squelchEnabled = false;
+					this.audio.squelchLevel = -100.0;
+					this.audio.noiseReduction = false;
+					this.audio.stereo = false;
+					this.audio.lowPass = false;
+					this.audio.highPass = false;
+					break;
+				case 'raw':
+					this.audio.bandwidth = this.radio.sampleRate;
+					this.audio.snapInterval = 2500;
+					this.audio.deEmphasis = 'none';
+					this.audio.squelchEnabled = false;
+					this.audio.squelchLevel = -100.0;
+					this.audio.noiseReduction = false;
+					this.audio.stereo = false;
+					this.audio.lowPass = false;
+					this.audio.highPass = false;
 					break;
 			}
 		});

@@ -107,9 +107,9 @@
 						<div class="form-row">
 							<label style="flex: 0 0 90px;">Bandwidth</label>
 							<div class="spin-group">
-								<input type="number" v-model.number="audio.bandwidth" step="1000">
-								<button @click="audio.bandwidth -= 1000">-</button>
-								<button @click="audio.bandwidth += 1000">+</button>
+								<input type="number" v-model.number="audio.bandwidth" step="1000" :disabled="audio.mode === 'raw'">
+								<button @click="audio.bandwidth -= 1000" :disabled="audio.mode === 'raw'">-</button>
+								<button @click="audio.bandwidth += 1000" :disabled="audio.mode === 'raw'">+</button>
 							</div>
 						</div>
 						
@@ -122,10 +122,12 @@
 							</div>
 						</div>
 
-						<div class="form-row">
+						<!-- De-emphasis: only shown for NFM and WFM (SDR++ deempAllowed) -->
+						<div class="form-row" v-if="audio.mode === 'wfm' || audio.mode === 'nfm'">
 							<label style="flex: 0 0 90px;">De-emphasis</label>
 							<select v-model="audio.deEmphasis" style="width: 130px; margin-left: auto;">
 								<option value="none">None</option>
+								<option value="22us">22us</option>
 								<option value="50us">50us</option>
 								<option value="75us">75us</option>
 							</select>
@@ -138,12 +140,13 @@
 								Squelch
 							</label>
 							<div class="slider-group compact-slider" style="margin-left: 8px;">
-								<input type="range" v-model.number="audio.squelchLevel" min="-150" max="0" step="1" :disabled="!audio.squelchEnabled">
+								<input type="range" v-model.number="audio.squelchLevel" min="-100" max="0" step="0.1" :disabled="!audio.squelchEnabled">
 								<span class="val">{{ audio.squelchLevel.toFixed(3) }}dB</span>
 							</div>
 						</div>
 
-						<div class="form-row full-checkbox-row">
+						<!-- IF Noise Reduction: only for NFM and WFM (SDR++ FMIFNRAllowed) -->
+						<div class="form-row full-checkbox-row" v-if="audio.mode === 'nfm' || audio.mode === 'wfm'">
 							<label class="custom-checkbox">
 								<input type="checkbox" v-model="audio.noiseReduction">
 								<span class="checkmark"></span>
@@ -151,7 +154,8 @@
 							</label>
 						</div>
 
-						<div class="form-row full-checkbox-row">
+						<!-- Stereo: only for WFM (SDR++ broadcast_fm.h stereo) -->
+						<div class="form-row full-checkbox-row" v-if="audio.mode === 'wfm'">
 							<label class="custom-checkbox">
 								<input type="checkbox" v-model="audio.stereo">
 								<span class="checkmark"></span>
@@ -159,12 +163,31 @@
 							</label>
 						</div>
 
-						<div class="form-row full-checkbox-row">
+						<!-- Low Pass: only for NFM and WFM (SDR++ fm.h / broadcast_fm.h) -->
+						<div class="form-row full-checkbox-row" v-if="audio.mode === 'nfm' || audio.mode === 'wfm'">
 							<label class="custom-checkbox">
 								<input type="checkbox" v-model="audio.lowPass">
 								<span class="checkmark"></span>
 								Low Pass
 							</label>
+						</div>
+
+						<!-- Decode RDS: only for WFM (SDR++ wfm.h) -->
+						<div class="form-row full-checkbox-row" v-if="audio.mode === 'wfm'">
+							<label class="custom-checkbox">
+								<input type="checkbox" v-model="audio.rds">
+								<span class="checkmark"></span>
+								Decode RDS
+							</label>
+						</div>
+
+						<!-- Advanced RDS Info / Region: only for WFM when RDS enabled -->
+						<div class="form-row" v-if="audio.mode === 'wfm' && audio.rds" style="align-items: center;">
+							<label style="flex: 0 0 120px; opacity: 0.7;">Advanced RDS Info</label>
+							<select v-model="audio.rdsRegion" style="width: 130px; margin-left: auto;">
+								<option value="eu">Europe</option>
+								<option value="na">North America</option>
+							</select>
 						</div>
 						
 						<!-- Keeping Volume for now, since it wasn't explicitly said to be removed, but placing at bottom -->
