@@ -28,24 +28,24 @@ pub struct FFT {
     smoothing_time_constant: f32,
     fft: std::sync::Arc<dyn rustfft::Fft<f32>>,
     prev: Box<[f32]>,
-    /// FFT作業用バッファ。再利用してアロケーションを回避
+    /// FFT working buffer. Reused to avoid allocations
     buffer: Vec<rustfft::num_complex::Complex<f32>>,
-    /// スケーリング（1/128 と 1/n）を含めた窓関数
+    /// Window function with pre-applied scaling (1/128 and 1/n)
     scaled_window: Box<[f32]>,
 }
 
 #[wasm_bindgen]
 impl FFT {
-    /// 新しいFFTプロセッサを作成する。
+    /// Create a new FFT processor.
     ///
-    /// # 引数
-    /// * `n` - FFTサイズ。2の累乗であり、0より大きい必要がある
-    /// * `window_` - 窓関数の配列。長さは `n` と等しくなければならない
+    /// # Arguments
+    /// * `n` - FFT size. Must be a power of two and greater than 0
+    /// * `window_` - Window function array. Length must equal `n`
     ///
-    /// # パニック
-    /// * `n` が 0 の場合
-    /// * `n` が 2の累乗でない場合
-    /// * `window_.len() != n` の場合
+    /// # Panics
+    /// * If `n` is 0
+    /// * If `n` is not a power of two
+    /// * If `window_.len() != n`
     #[allow(clippy::new_without_default)]
     #[wasm_bindgen(constructor)]
     pub fn new(n: usize, window_: &[f32]) -> Self {
@@ -58,9 +58,9 @@ impl FFT {
         let smoothing_time_constant = 0.0;
         let buffer = vec![Complex { re: 0.0, im: 0.0 }; n];
 
-        // 窓関数にスケーリング係数を事前に適用しておく
-        // 1/128: i8 (-128..127) を -1..1 に正規化
-        // 1/n: FFTの正規化
+        // Pre-apply scaling factors to window function
+        // 1/128: normalize i8 (-128..127) to -1..1
+        // 1/n: FFT normalization
         let scale = 1.0 / (128.0 * n as f32);
         let scaled_window = window_.iter().map(|&w| w * scale).collect::<Vec<_>>().into_boxed_slice();
 
@@ -78,49 +78,49 @@ impl FFT {
         self.smoothing_time_constant = val;
     }
 
-    /// HackRF One の IQ サンプル列に対して複素 FFT を実行し、
-    /// スペクトログラムのウォーターフォール表示に必要な前処理を全て行う。
+    /// Perform a complex FFT on HackRF One IQ samples and apply all
+    /// preprocessing needed for spectrogram waterfall display.
     ///
-    /// このメソッドは以下の処理をワンパスで実行する：
-    /// 1. IQ サンプルの正規化（i8 → f32）
-    /// 2. 窓関数の適用
-    /// 3. 複素 FFT
-    /// 4. DC 中心配置への周波数軸の並べ替え
-    /// 5. 指数移動平均によるスムージング（設定時）
-    /// 6. dB スケールへの変換
+    /// This method performs the following operations in a single pass:
+    /// 1. Normalize IQ samples (i8 → f32)
+    /// 2. Apply window function
+    /// 3. Complex FFT
+    /// 4. Rearrange frequency axis to DC-centered layout
+    /// 5. Exponential moving average smoothing (when configured)
+    /// 6. Convert to dB scale
     ///
-    /// 出力された配列は、そのままスペクトログラムの1行（時刻 t におけるスペクトル）として
-    /// ウォーターフォール表示に使用できる。
+    /// The output array can be used directly as a single row (spectrum at time t)
+    /// in a waterfall spectrogram display.
     ///
-    /// # 入力形式
-    /// * `input_` - i8の配列として表現された複素数列 `[re0, im0, re1, im1, ...]`
-    ///               長さは `self.n * 2` でなければならない
+    /// # Input format
+    /// * `input_` - Complex sequence as i8 array `[re0, im0, re1, im1, ...]`
+    ///               Length must be `self.n * 2`
     ///
-    /// # 出力形式
-    /// * `result` - 結果を格納するバッファ。長さは `self.n` でなければならない
-    ///   - `result[0 .. half_n]` - 負の周波数成分（DC中心配置、dBスケール）
-    ///   - `result[half_n .. n]` - 正の周波数成分（DC中心配置、dBスケール）
+    /// # Output format
+    /// * `result` - Buffer to store results. Length must be `self.n`
+    ///   - `result[0 .. half_n]` - Negative frequency components (DC-centered, dB scale)
+    ///   - `result[half_n .. n]` - Positive frequency components (DC-centered, dB scale)
     ///
-    /// # コントラクト（呼び出し側の責任）
-    /// * `input_.len() == self.n * 2` でなければならない
-    /// * `result.len() == self.n` でなければならない
+    /// # Contract (caller's responsibility)
+    /// * `input_.len() == self.n * 2` must hold
+    /// * `result.len() == self.n` must hold
     ///
-    /// # 安全性
-    /// この関数は unsafe なメモリ再解釈を使用する。コントラクトに違反する場合、
-    /// 未定義動作を引き起こす可能性がある。
+    /// # Safety
+    /// This function uses unsafe memory reinterpretation. Violating the contract
+    /// may cause undefined behavior.
     pub fn fft(&mut self, input_: &[i8], result: &mut [f32]) {
         debug_assert_eq!(input_.len(), self.n * 2, "Input length must be n * 2");
         debug_assert_eq!(result.len(), self.n, "Result length must be n");
 
-        // i8配列 [re0, im0, re1, im1, ...] を Complex<i8> スライスとして再解釈
+        // Reinterpret i8 array [re0, im0, re1, im1, ...] as a Complex<i8> slice
         let input_complex: &[Complex<i8>] = unsafe {
             slice::from_raw_parts(input_.as_ptr() as *const Complex<i8>, self.n)
         };
 
-        // 作業用バッファ（構造体に保持して再利用、アロケーション回避）
+        // Working buffer (stored in struct for reuse, avoiding allocations)
         let buffer = &mut self.buffer;
 
-        // 正規化と窓関数の適用。scaled_window に 1/128 と 1/n のスケールが含まれている。
+        // Normalize and apply window function. scaled_window includes 1/128 and 1/n scaling.
         for i in 0..self.n {
             buffer[i] = Complex {
                 re: input_complex[i].re as f32,
@@ -128,22 +128,22 @@ impl FFT {
             } * self.scaled_window[i];
         }
 
-        // FFT実行（in-place変換）
+        // Execute FFT (in-place transform)
         self.fft.process(buffer);
 
-        // 以下の処理を1パスに統合：
-        // 1. DC中心配置への再配置
-        // 2. 指数移動平均によるスムージング
-        // 3. dBスケールへの変換
+        // Combined into a single pass:
+        // 1. Rearrange to DC-centered layout
+        // 2. Exponential moving average smoothing
+        // 3. Convert to dB scale
         let half_n = self.n / 2;
         let alpha = self.smoothing_time_constant;
         let inv_alpha = 1.0 - alpha;
 
         for i in 0..self.n {
-            // result[i] に入れるべき成分の、buffer内でのインデックスを計算（DC Shift）
+            // Calculate the buffer index for the component that goes into result[i] (DC shift)
             let src_idx = if i < half_n { i + half_n } else { i - half_n };
             
-            // すでに scaled_window により 1/n 倍されているため、norm() するだけでよい
+            // Already scaled by 1/n via scaled_window, so just compute norm()
             let magnitude = buffer[src_idx].norm();
 
             let smoothed = if alpha > 0.0 {
@@ -154,7 +154,7 @@ impl FFT {
                 magnitude
             };
 
-            // log10(0) = -inf を避けるため、小さな値で下限を設ける
+            // Clamp to a small value to avoid log10(0) = -inf
             result[i] = smoothed.max(1e-10).log10() * 10.0;
         }
     }
@@ -266,7 +266,7 @@ impl DspProcessor {
 mod tests {
     use super::*;
 
-    /// 窓関数なしの単位窓を生成
+    /// Generate a unit (rectangular) window with no shaping
     fn ones_window(n: usize) -> Vec<f32> {
         vec![1.0; n]
     }
@@ -278,7 +278,7 @@ mod tests {
         let fft = FFT::new(n, &window);
 
         assert_eq!(fft.n, n);
-        // 内部フィールドは直接アクセスできないが、構築が成功すれば OK
+        // Internal fields are not directly accessible, but construction succeeding is OK
     }
 
     #[test]
@@ -288,48 +288,48 @@ mod tests {
         let mut fft = FFT::new(n, &window);
 
         fft.set_smoothing_time_constant(0.5);
-        // 設定が成功すれば OK（内部フィールドはプライベート）
+        // Setting succeeds is OK (internal fields are private)
     }
 
     #[test]
     fn test_fft_dc_input() {
-        // DC 成分のみ（全て同じ値）の入力に対する FFT テスト
+        // FFT test with DC-only input (all same values)
         let n = 8;
         let window = ones_window(n);
         let mut fft = FFT::new(n, &window);
 
-        let mut input = vec![0i8; n * 2]; // Complex<i8> なので n * 2
+        let mut input = vec![0i8; n * 2]; // Complex<i8> so n * 2
         for i in 0..n {
-            input[i * 2] = 64; // 宽数 = 64
-            input[i * 2 + 1] = 0; // 虚数 = 0
+            input[i * 2] = 64; // real = 64
+            input[i * 2 + 1] = 0; // imaginary = 0
         }
 
         let mut result = vec![0.0f32; n];
         fft.fft(&input, &mut result);
 
-        // 結果は DC中心に並べ替えられるため、DC成分は中央（half_n）に来る
+        // Results are rearranged to DC-centered, so DC component is at center (half_n)
         let half_n = n / 2;
         let dc_component = result.iter().enumerate().max_by(|a, b| {
             a.1.partial_cmp(b.1).unwrap()
         });
 
-        // DC成分がインデックス4（half_n）にあるはず
+        // DC component should be at index 4 (half_n)
         assert_eq!(dc_component.unwrap().0, half_n);
     }
 
     #[test]
     fn test_fft_zero_input_should_not_produce_inf() {
-        // 全て0の入力: log10(0) = -inf になるべきではない
+        // All-zero input: should not produce log10(0) = -inf
         let n = 8;
         let window = ones_window(n);
         let mut fft = FFT::new(n, &window);
 
-        let input = vec![0i8; n * 2]; // 全て0
+        let input = vec![0i8; n * 2]; // all zeros
 
         let mut result = vec![0.0f32; n];
         fft.fft(&input, &mut result);
 
-        // 全ての結果が finite であるべき（inf, -inf, NaN でない）
+        // All results should be finite (not inf, -inf, or NaN)
         for (i, &val) in result.iter().enumerate() {
             assert!(
                 val.is_finite(),
@@ -341,8 +341,8 @@ mod tests {
 
     #[test]
     fn test_fft_smoothing() {
-        // スムージングの効果を数値的に検証
-        // smoothing_time_constant = 0.5 のとき:
+        // Numerically verify the effect of smoothing
+        // When smoothing_time_constant = 0.5:
         // result[k] = 0.5 * prev[k] + 0.5 * current[k]
         let n = 8;
         let window = ones_window(n);
@@ -351,8 +351,8 @@ mod tests {
 
         let mut input = vec![0i8; n * 2];
         for i in 0..n {
-            input[i * 2] = 64; // 宽数 = 64
-            input[i * 2 + 1] = 0; // 虚数 = 0
+            input[i * 2] = 64; // real = 64
+            input[i * 2 + 1] = 0; // imaginary = 0
         }
 
         let mut result1 = vec![0.0f32; n];
@@ -361,13 +361,13 @@ mod tests {
         let mut result2 = vec![0.0f32; n];
         fft.fft(&input, &mut result2);
 
-        // スムージング適用時、2回目の結果は1回目の結果と異なるはず
-        // （prevが0でない値を持っているため）
+        // With smoothing applied, the 2nd result should differ from the 1st
+        // (because prev holds non-zero values)
         let mut differences_found = false;
         for i in 0..n {
             if result1[i].is_finite() && result2[i].is_finite() {
                 let diff = (result1[i] - result2[i]).abs();
-                // スムージングにより値が変化しているはず（誤差許容1e-6）
+                // Values should have changed due to smoothing (tolerance 1e-6)
                 if diff > 1e-6 {
                     differences_found = true;
                 }
@@ -381,11 +381,11 @@ mod tests {
 
     #[test]
     fn test_fft_smoothing_disabled_when_constant_is_zero() {
-        // smoothing_time_constant = 0 のときスムージングは無効
+        // Smoothing is disabled when smoothing_time_constant = 0
         let n = 8;
         let window = ones_window(n);
         let mut fft = FFT::new(n, &window);
-        // デフォルトは 0.0
+        // Default is 0.0
 
         let mut input = vec![0i8; n * 2];
         for i in 0..n {
@@ -399,7 +399,7 @@ mod tests {
         let mut result2 = vec![0.0f32; n];
         fft.fft(&input, &mut result2);
 
-        // スムージング無効時、同じ入力 → 同じ出力
+        // Without smoothing, same input → same output
         for i in 0..n {
             if result1[i].is_finite() && result2[i].is_finite() {
                 assert_eq!(
@@ -413,13 +413,13 @@ mod tests {
 
     #[test]
     fn test_fft_smoothing_edge_cases() {
-        // smoothing_time_constant の境界値テスト
+        // Boundary value tests for smoothing_time_constant
         let n = 8;
         let window = ones_window(n);
 
-        // 0.0: スムージング無効（上でテスト済み）
+        // 0.0: Smoothing disabled (tested above)
 
-        // 1.0: 完全に前の値を保持（新しい値は無視）
+        // 1.0: Fully retain previous value (ignore new value)
         let mut fft = FFT::new(n, &window);
         fft.set_smoothing_time_constant(1.0);
 
@@ -435,7 +435,7 @@ mod tests {
         let mut result2 = vec![0.0f32; n];
         fft.fft(&input, &mut result2);
 
-        // α=1.0 のとき、result2 は result1 と同じはず（prevを完全に維持）
+        // When α=1.0, result2 should equal result1 (prev is fully retained)
         for i in 0..n {
             if result1[i].is_finite() && result2[i].is_finite() {
                 assert_eq!(
@@ -446,14 +446,14 @@ mod tests {
             }
         }
 
-        // 負の値: 挙動は未定義だがクラッシュしてはいけない
+        // Negative value: behavior is undefined but must not crash
         let mut fft = FFT::new(n, &window);
         fft.set_smoothing_time_constant(-0.5);
         let mut result = vec![0.0f32; n];
-        // クラッシュしなければ OK
+        // OK as long as it doesn't crash
         fft.fft(&input, &mut result);
 
-        // 1.0より大きい値: 振動するがクラッシュしてはいけない
+        // Value greater than 1.0: may oscillate but must not crash
         let mut fft = FFT::new(n, &window);
         fft.set_smoothing_time_constant(1.5);
         let mut result = vec![0.0f32; n];
@@ -462,12 +462,12 @@ mod tests {
 
     #[test]
     fn test_fft_dc_input_magnitude() {
-        // DC入力のFFT結果の数値的正しさを検証
+        // Verify numerical correctness of FFT results for DC input
         let n = 8;
         let window = ones_window(n);
         let mut fft = FFT::new(n, &window);
 
-        // DC成分: 全て (64 + 0j)
+        // DC component: all (64 + 0j)
         let mut input = vec![0i8; n * 2];
         for i in 0..n {
             input[i * 2] = 64;
@@ -477,13 +477,13 @@ mod tests {
         let mut result = vec![0.0f32; n];
         fft.fft(&input, &mut result);
 
-        // 理論値の計算:
-        // 入力: 64/128 = 0.5
-        // FFT後のDC成分: 0.5 * 8 = 4.0 (norm() で2乗なので 4.0^2 = 16.0、normは sqrt(16) = 4.0)
-        // 正規化: 4.0 / 8 = 0.5
+        // Theoretical calculation:
+        // Input: 64/128 = 0.5
+        // DC component after FFT: 0.5 * 8 = 4.0 (norm() squares so 4.0^2 = 16.0, norm is sqrt(16) = 4.0)
+        // Normalization: 4.0 / 8 = 0.5
         // dB: 10 * log10(0.5) ≈ -3.01
         let half_n = n / 2;
-        let dc_value = result[half_n]; // DC成分は中央
+        let dc_value = result[half_n]; // DC component is at center
 
         let expected_db = 10.0 * 0.5_f32.log10(); // ≈ -3.01
         assert!(
@@ -492,7 +492,7 @@ mod tests {
             dc_value, expected_db
         );
 
-        // DC成分が最大であるべき
+        // DC component should be the maximum
         let max_idx = result
             .iter()
             .enumerate()
@@ -504,21 +504,21 @@ mod tests {
 
     #[test]
     fn test_fft_negative_input() {
-        // 負の入力値のテスト
+        // Test with negative input values
         let n = 8;
         let window = ones_window(n);
         let mut fft = FFT::new(n, &window);
 
         let mut input = vec![0i8; n * 2];
         for i in 0..n {
-            input[i * 2] = -64; // 負の値
+            input[i * 2] = -64; // negative value
             input[i * 2 + 1] = 0;
         }
 
         let mut result = vec![0.0f32; n];
         fft.fft(&input, &mut result);
 
-        // 全て finite であるべき
+        // All values should be finite
         for (i, &val) in result.iter().enumerate() {
             assert!(
                 val.is_finite(),
@@ -530,7 +530,7 @@ mod tests {
 
     #[test]
     fn test_fft_i8_boundary_values() {
-        // i8 の境界値テスト
+        // Boundary value tests for i8
         let n = 8;
         let window = ones_window(n);
         let mut fft = FFT::new(n, &window);
@@ -548,7 +548,7 @@ mod tests {
             let mut result = vec![0.0f32; n];
             fft.fft(&input, &mut result);
 
-            // クラッシュせず、全て finite であるべき
+            // Should not crash, all values should be finite
             for (i, &r) in result.iter().enumerate() {
                 assert!(
                     r.is_finite(),
@@ -563,7 +563,7 @@ mod tests {
     #[should_panic(expected = "Window size must match FFT size")]
     fn test_fft_window_size_mismatch() {
         let n = 8;
-        let window = vec![1.0; 4]; // サイズ不足
+        let window = vec![1.0; 4]; // undersized
         let _fft = FFT::new(n, &window);
     }
 
@@ -571,7 +571,7 @@ mod tests {
     #[should_panic(expected = "Window size must match FFT size")]
     fn test_fft_window_size_oversized() {
         let n = 8;
-        let window = vec![1.0; 16]; // サイズ超過
+        let window = vec![1.0; 16]; // oversized
         let _fft = FFT::new(n, &window);
     }
 
@@ -584,7 +584,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "FFT size must be a power of two")]
     fn test_fft_non_power_of_two() {
-        let n = 7; // 2の累乗でない
+        let n = 7; // not a power of two
         let window = vec![1.0; n];
         let _fft = FFT::new(n, &window);
     }
@@ -592,18 +592,18 @@ mod tests {
     #[test]
     #[should_panic(expected = "FFT size must be a power of two")]
     fn test_fft_odd_size() {
-        let n = 9; // 奇数
+        let n = 9; // odd number
         let window = vec![1.0; n];
         let _fft = FFT::new(n, &window);
     }
 
     #[test]
     fn test_fft_differential_against_reference() {
-        // 参照実装（愚直な実装）と最適化版の結果を比較する
+        // Compare results between reference (naive) implementation and optimized version
         let n = 16;
         let mut window = vec![0.0f32; n];
         for (i, w) in window.iter_mut().enumerate() {
-             // Hann 窓的なものを生成
+             // Generate a Hann-like window
              *w = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (n - 1) as f32).cos());
         }
         
@@ -616,19 +616,19 @@ mod tests {
             input[i*2+1] = (7i8).wrapping_sub(i as i8).wrapping_mul(10);
         }
         
-        // 1回目の実行（prevを0から更新）
+        // First run (updating prev from zero)
         let mut result_opt = vec![0.0f32; n];
         fft.fft(&input, &mut result_opt);
         
-        // 参照計算（1回目）
-        let mut prev = vec![0.0f32; n]; // 初期状態
+        // Reference calculation (1st run)
+        let mut prev = vec![0.0f32; n]; // initial state
         let expected = calculate_reference_fft(n, &window, &input, &mut prev, 0.3);
         
         for i in 0..n {
             assert!((result_opt[i] - expected[i]).abs() < 1e-5, "Mismatch at index {} on 1st run: opt={}, expected={}", i, result_opt[i], expected[i]);
         }
         
-        // 2回目の実行（Smoothingの効果を確認）
+        // Second run (verify smoothing effect)
         fft.fft(&input, &mut result_opt);
         let expected2 = calculate_reference_fft(n, &window, &input, &mut prev, 0.3);
         
@@ -637,7 +637,7 @@ mod tests {
         }
     }
 
-    /// 参照用の愚直な計算（効率は無視）
+    /// Naive reference calculation (efficiency ignored)
     fn calculate_reference_fft(n: usize, window: &[f32], input: &[i8], prev: &mut [f32], alpha: f32) -> Vec<f32> {
         use rustfft::num_complex::Complex;
         let mut buffer = vec![Complex { re: 0.0, im: 0.0 }; n];
@@ -704,7 +704,7 @@ mod wasm_tests {
         let mut result = vec![0.0f32; n];
         fft.fft(&input, &mut result);
 
-        // 結果のサイズが正しいことを確認
+        // Verify the result size is correct
         assert_eq!(result.len(), n);
     }
 }
