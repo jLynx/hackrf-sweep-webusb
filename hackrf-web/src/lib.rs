@@ -25,7 +25,7 @@ pub fn set_panic_hook() {
 #[wasm_bindgen]
 pub struct FFT {
     n: usize,
-    smoothing_time_constant: f32,
+    smoothing_speed: f32,
     fft: std::sync::Arc<dyn rustfft::Fft<f32>>,
     prev: Box<[f32]>,
     /// FFT working buffer. Reused to avoid allocations
@@ -55,18 +55,22 @@ impl FFT {
 
         let fft = FftPlanner::new().plan_fft_forward(n);
         let prev = vec![0.0; n].into_boxed_slice();
-        let smoothing_time_constant = 0.0;
+        let smoothing_speed = 1.0;
         let buffer = vec![Complex { re: 0.0, im: 0.0 }; n];
 
         // Pre-apply scaling factors to window function
         // 1/128: normalize i8 (-128..127) to -1..1
         // 1/n: FFT normalization
+        // (-1)^i: pre-FFT DC centering (equivalent to fftShift, matches SDR++ iq_frontend.cpp)
         let scale = 1.0 / (128.0 * n as f32);
-        let scaled_window = window_.iter().map(|&w| w * scale).collect::<Vec<_>>().into_boxed_slice();
+        let scaled_window = window_.iter().enumerate().map(|(i, &w)| {
+            let shift = if i % 2 == 0 { 1.0f32 } else { -1.0f32 };
+            w * scale * shift
+        }).collect::<Vec<_>>().into_boxed_slice();
 
         FFT {
             n,
-            smoothing_time_constant,
+            smoothing_speed,
             fft,
             prev,
             buffer,
@@ -74,8 +78,8 @@ impl FFT {
         }
     }
 
-    pub fn set_smoothing_time_constant(&mut self, val: f32) {
-        self.smoothing_time_constant = val;
+    pub fn set_smoothing_speed(&mut self, val: f32) {
+        self.smoothing_speed = val;
     }
 
     /// Perform a complex FFT on HackRF One IQ samples and apply all
@@ -131,31 +135,29 @@ impl FFT {
         // Execute FFT (in-place transform)
         self.fft.process(buffer);
 
-        // Combined into a single pass:
-        // 1. Rearrange to DC-centered layout
-        // 2. Exponential moving average smoothing
-        // 3. Convert to dB scale
-        let half_n = self.n / 2;
-        let alpha = self.smoothing_time_constant;
+        // Combined into a single pass (matches SDR++ iq_frontend.cpp + waterfall.cpp):
+        // 1. DC centering already done via (-1)^i in window (pre-FFT shift)
+        // 2. Power spectrum: 10 * log10(re² + im²) (matches volk_32fc_s32f_power_spectrum_32f)
+        // 3. Exponential moving average smoothing in dB domain
+        let alpha = self.smoothing_speed;
         let inv_alpha = 1.0 - alpha;
 
         for i in 0..self.n {
-            // Calculate the buffer index for the component that goes into result[i] (DC shift)
-            let src_idx = if i < half_n { i + half_n } else { i - half_n };
-            
-            // Already scaled by 1/n via scaled_window, so just compute norm()
-            let magnitude = buffer[src_idx].norm();
+            // Power spectrum (matches SDR++ volk_32fc_s32f_power_spectrum_32f)
+            // Already scaled by 1/(128*n) via scaled_window
+            let power = buffer[i].norm_sqr();
+            let db = power.max(1e-20).log10() * 10.0;
 
-            let smoothed = if alpha > 0.0 {
-                let s = alpha * self.prev[i] + inv_alpha * magnitude;
+            // EMA smoothing in dB domain (matches SDR++ waterfall.cpp pushFFT)
+            // SDR++ formula: result = alpha * new + (1-alpha) * old
+            // alpha = speed: 1.0 = no smoothing, 0.0 = frozen
+            result[i] = if alpha < 1.0 {
+                let s = alpha * db + inv_alpha * self.prev[i];
                 self.prev[i] = s;
                 s
             } else {
-                magnitude
+                db
             };
-
-            // Clamp to a small value to avoid log10(0) = -inf
-            result[i] = smoothed.max(1e-10).log10() * 10.0;
         }
     }
 }
@@ -282,12 +284,12 @@ mod tests {
     }
 
     #[test]
-    fn test_fft_set_smoothing_time_constant() {
+    fn test_fft_set_smoothing_speed() {
         let n = 8;
         let window = ones_window(n);
         let mut fft = FFT::new(n, &window);
 
-        fft.set_smoothing_time_constant(0.5);
+        fft.set_smoothing_speed(0.5);
         // Setting succeeds is OK (internal fields are private)
     }
 
@@ -342,12 +344,12 @@ mod tests {
     #[test]
     fn test_fft_smoothing() {
         // Numerically verify the effect of smoothing
-        // When smoothing_time_constant = 0.5:
-        // result[k] = 0.5 * prev[k] + 0.5 * current[k]
+        // When smoothing_speed = 0.5 (SDR++ semantics):
+        // result[k] = 0.5 * new_dB[k] + 0.5 * prev_dB[k]
         let n = 8;
         let window = ones_window(n);
         let mut fft = FFT::new(n, &window);
-        fft.set_smoothing_time_constant(0.5);
+        fft.set_smoothing_speed(0.5);
 
         let mut input = vec![0i8; n * 2];
         for i in 0..n {
@@ -380,12 +382,12 @@ mod tests {
     }
 
     #[test]
-    fn test_fft_smoothing_disabled_when_constant_is_zero() {
-        // Smoothing is disabled when smoothing_time_constant = 0
+    fn test_fft_smoothing_disabled_when_speed_is_one() {
+        // Smoothing is disabled when smoothing_speed = 1.0 (SDR++ semantics: 1.0 = no smoothing)
         let n = 8;
         let window = ones_window(n);
         let mut fft = FFT::new(n, &window);
-        // Default is 0.0
+        // Default is 1.0 (no smoothing)
 
         let mut input = vec![0i8; n * 2];
         for i in 0..n {
@@ -413,15 +415,15 @@ mod tests {
 
     #[test]
     fn test_fft_smoothing_edge_cases() {
-        // Boundary value tests for smoothing_time_constant
+        // Boundary value tests for smoothing_speed (SDR++ semantics)
         let n = 8;
         let window = ones_window(n);
 
-        // 0.0: Smoothing disabled (tested above)
+        // 1.0: No smoothing (100% new value, tested above)
 
-        // 1.0: Fully retain previous value (ignore new value)
+        // 0.0: Fully retain previous value (ignore new value, output frozen)
         let mut fft = FFT::new(n, &window);
-        fft.set_smoothing_time_constant(1.0);
+        fft.set_smoothing_speed(0.0);
 
         let mut input = vec![0i8; n * 2];
         for i in 0..n {
@@ -435,12 +437,12 @@ mod tests {
         let mut result2 = vec![0.0f32; n];
         fft.fft(&input, &mut result2);
 
-        // When α=1.0, result2 should equal result1 (prev is fully retained)
+        // When α=0.0, result2 should equal result1 (output is frozen)
         for i in 0..n {
             if result1[i].is_finite() && result2[i].is_finite() {
                 assert_eq!(
                     result1[i], result2[i],
-                    "With α=1.0, output should stay constant at index {}",
+                    "With α=0.0, output should stay constant at index {}",
                     i
                 );
             }
@@ -448,14 +450,14 @@ mod tests {
 
         // Negative value: behavior is undefined but must not crash
         let mut fft = FFT::new(n, &window);
-        fft.set_smoothing_time_constant(-0.5);
+        fft.set_smoothing_speed(-0.5);
         let mut result = vec![0.0f32; n];
         // OK as long as it doesn't crash
         fft.fft(&input, &mut result);
 
         // Value greater than 1.0: may oscillate but must not crash
         let mut fft = FFT::new(n, &window);
-        fft.set_smoothing_time_constant(1.5);
+        fft.set_smoothing_speed(1.5);
         let mut result = vec![0.0f32; n];
         fft.fft(&input, &mut result);
     }
@@ -479,13 +481,14 @@ mod tests {
 
         // Theoretical calculation:
         // Input: 64/128 = 0.5
-        // DC component after FFT: 0.5 * 8 = 4.0 (norm() squares so 4.0^2 = 16.0, norm is sqrt(16) = 4.0)
-        // Normalization: 4.0 / 8 = 0.5
-        // dB: 10 * log10(0.5) ≈ -3.01
+        // With (-1)^i window shift, DC signal becomes alternating → all energy at bin N/2
+        // DC component after FFT: 0.5 * 8 = 4.0 (scaled by 1/(128*8)), magnitude = 0.5
+        // Power: 0.5^2 = 0.25
+        // dB: 10 * log10(0.25) ≈ -6.02
         let half_n = n / 2;
         let dc_value = result[half_n]; // DC component is at center
 
-        let expected_db = 10.0 * 0.5_f32.log10(); // ≈ -3.01
+        let expected_db = 10.0 * (0.5_f32 * 0.5_f32).log10(); // ≈ -6.02
         assert!(
             (dc_value - expected_db).abs() < 0.1,
             "DC component {} should be close to {} (dB)",
@@ -608,7 +611,7 @@ mod tests {
         }
         
         let mut fft = FFT::new(n, &window);
-        fft.set_smoothing_time_constant(0.3);
+        fft.set_smoothing_speed(0.3);
         
         let mut input = vec![0i8; n * 2];
         for i in 0..n {
@@ -637,38 +640,37 @@ mod tests {
         }
     }
 
-    /// Naive reference calculation (efficiency ignored)
+    /// Naive reference calculation matching SDR++ pipeline (efficiency ignored)
     fn calculate_reference_fft(n: usize, window: &[f32], input: &[i8], prev: &mut [f32], alpha: f32) -> Vec<f32> {
         use rustfft::num_complex::Complex;
+        // Apply window with (-1)^i shift and scaling (matches SDR++ iq_frontend.cpp)
+        let scale = 1.0 / (128.0 * n as f32);
         let mut buffer = vec![Complex { re: 0.0, im: 0.0 }; n];
         for i in 0..n {
+            let shift = if i % 2 == 0 { 1.0f32 } else { -1.0f32 };
             buffer[i] = Complex {
-                re: input[i*2] as f32 / 128.0,
-                im: input[i*2+1] as f32 / 128.0,
-            } * window[i];
+                re: input[i*2] as f32,
+                im: input[i*2+1] as f32,
+            } * (window[i] * scale * shift);
         }
         
         let mut planner = FftPlanner::new();
         let fft = planner.plan_fft_forward(n);
         fft.process(&mut buffer);
         
-        let half_n = n / 2;
-        let mut shifted = vec![0.0f32; n];
-        for i in 0..half_n {
-            shifted[i + half_n] = buffer[i].norm() / n as f32;
-            shifted[i] = buffer[i + half_n].norm() / n as f32;
-        }
-        
+        // Power spectrum + dB + smoothing in dB domain (matches SDR++ waterfall.cpp)
         let mut res = vec![0.0f32; n];
         for i in 0..n {
-            let magnitude = if alpha > 0.0 {
-                let s = alpha * prev[i] + (1.0 - alpha) * shifted[i];
+            let power = buffer[i].norm_sqr();
+            let db = power.max(1e-20).log10() * 10.0;
+            
+            res[i] = if alpha < 1.0 {
+                let s = alpha * db + (1.0 - alpha) * prev[i];
                 prev[i] = s;
                 s
             } else {
-                shifted[i]
+                db
             };
-            res[i] = magnitude.max(1e-10).log10() * 10.0;
         }
         res
     }

@@ -122,7 +122,7 @@ class Worker {
 			spectrumWindow[i] = spectrumWindowFunc(i / fftSize);
 		}
 		const spectrumFft = new FFT(fftSize, spectrumWindow);
-		spectrumFft.set_smoothing_time_constant(0.6);
+		spectrumFft.set_smoothing_speed(0.6);
 		const spectrumOutput = new Float32Array(fftSize);
 
 		const iqBuffer = new Int8Array(fftSize * 2);
@@ -153,27 +153,58 @@ class Worker {
 			return Math.floor(3.8 * samplerate / transWidth);
 		};
 
-		const windowedSinc = (count, cutoff, samplerate) => {
+		const windowedSincBase = (count, omega, windowFunc, norm = 1.0) => {
 			const taps = new Float32Array(count);
-			const omega = hzToRads(cutoff, samplerate);
 			const half = count / 2.0;
-			const corr = omega / Math.PI;
+			const corr = norm * omega / Math.PI;
 
 			for (let i = 0; i < count; i++) {
 				const t = i - half + 0.5;
-				taps[i] = sinc(t * omega) * nuttall(t - half, count) * corr;
+				taps[i] = sinc(t * omega) * windowFunc(t - half, count) * corr;
 			}
-
 			return taps;
 		};
 
+		const lowPassTaps = (cutoff, transWidth, samplerate, oddTapCount = false) => {
+			let count = estimateTapCount(transWidth, samplerate);
+			if (oddTapCount && count % 2 === 0) count++;
+			const omega = hzToRads(cutoff, samplerate);
+			return windowedSincBase(count, omega, (n, N) => nuttall(n, N));
+		};
+
+		const highPassTaps = (cutoff, transWidth, samplerate, oddTapCount = false) => {
+			let count = estimateTapCount(transWidth, samplerate);
+			if (oddTapCount && count % 2 === 0) count++;
+			const omega = hzToRads((samplerate / 2.0) - cutoff, samplerate);
+			return windowedSincBase(count, omega, (n, N) => {
+				return nuttall(n, N) * ((Math.abs(Math.round(n)) % 2 !== 0) ? -1.0 : 1.0);
+			});
+		};
+
+		const bandPassTaps = (bandStart, bandStop, transWidth, samplerate, oddTapCount = false) => {
+			let count = estimateTapCount(transWidth, samplerate);
+			if (oddTapCount && count % 2 === 0) count++;
+			const offsetOmega = hzToRads((bandStart + bandStop) / 2.0, samplerate);
+			const omega = hzToRads((bandStop - bandStart) / 2.0, samplerate);
+			return windowedSincBase(count, omega, (n, N) => {
+				return 2.0 * Math.cos(offsetOmega * n) * nuttall(n, N);
+			});
+		};
+
 		class FIRFilter {
-			constructor(cutoff, transWidth, samplerate) {
-				let count = estimateTapCount(transWidth, samplerate);
-				// Even count
-				// if (count % 2 !== 0) count++;
-				this.taps = windowedSinc(count, cutoff, samplerate);
+			constructor(taps) {
+				if (!taps) taps = new Float32Array([1.0]);
+				this.setTaps(taps);
+			}
+
+			setTaps(taps) {
+				this.taps = taps;
 				this.history = new Float32Array(this.taps.length);
+				this.histIdx = 0;
+			}
+
+			reset() {
+				this.history.fill(0);
 				this.histIdx = 0;
 			}
 
@@ -278,8 +309,7 @@ class Worker {
 				const tapTransWidth = tapBandwidth * 0.1;
 
 				// Generate taps and multiply by interp
-				let tapCount = estimateTapCount(tapTransWidth, tapSamplerate);
-				let taps = windowedSinc(tapCount, tapBandwidth, tapSamplerate);
+				let taps = lowPassTaps(tapBandwidth, tapTransWidth, tapSamplerate);
 				for (let i = 0; i < taps.length; i++) taps[i] *= this.interp;
 
 				this.resamp = new PolyphaseResampler(this.interp, this.decim, taps);
@@ -316,14 +346,13 @@ class Worker {
 			carrierAgcGain: 1.0,
 			// Filters state
 			wfmFir: null,
+			nfmFir: new FIRFilter(new Float32Array([1.0])),
+			nfmLastBw: -1,
+			nfmLastLp: null,
+			nfmLastHp: null,
 			audioResampler: null,
 			// De-emphasis (SDR++ style: y = alpha*x + (1-alpha)*y_prev)
 			deemphPrev: 0,
-			// Low pass FIR state (simple IIR approximation for browser - NFM only)
-			lpPrev: 0,
-			// High pass state (for NFM)
-			hpPrev: 0,
-			hpPrevIn: 0,
 			// AGC state (SDR++ loop::AGC style)
 			agcGain: 1.0,
 			// SSB/CW frequency translator state
@@ -339,7 +368,7 @@ class Worker {
 		const AUDIO_RATE = 48000;
 
 		// Initialize FIR Filter only for WFM with 15kHz cutoff, 4kHz transition bandwidth
-		state.wfmFir = new FIRFilter(15000.0, 4000.0, actualDemodRate);
+		state.wfmFir = new FIRFilter(lowPassTaps(15000.0, 4000.0, actualDemodRate));
 
 		// Initialize the high-quality Polyphase Resampler for audio decimation
 		state.audioResampler = new RationalResampler(actualDemodRate, AUDIO_RATE);
@@ -399,6 +428,24 @@ class Worker {
 
 				const mode = this.audioParams.mode;
 				const bw = this.audioParams.bandwidth || 150000;
+
+				if (mode === 'nfm') {
+					if (bw !== state.nfmLastBw || this.audioParams.lowPass !== state.nfmLastLp || this.audioParams.highPass !== state.nfmLastHp) {
+						state.nfmLastBw = bw;
+						state.nfmLastLp = this.audioParams.lowPass;
+						state.nfmLastHp = this.audioParams.highPass;
+
+						if (this.audioParams.lowPass && this.audioParams.highPass) {
+							state.nfmFir.setTaps(bandPassTaps(300.0, bw / 2.0, 100.0, actualDemodRate));
+						} else if (this.audioParams.highPass) {
+							state.nfmFir.setTaps(highPassTaps(300.0, 100.0, actualDemodRate));
+						} else if (this.audioParams.lowPass) {
+							state.nfmFir.setTaps(lowPassTaps(bw / 2.0, (bw / 2.0) * 0.1, actualDemodRate));
+						} else {
+							state.nfmFir.setTaps(new Float32Array([1.0]));
+						}
+					}
+				}
 
 				for (let i = 0; i < numDemodSamples; i++) {
 					const dI = ddcOutput[i * 2];
@@ -520,27 +567,9 @@ class Worker {
 					}
 
 					// ── NFM Low/High Pass Filter (SDR++ fm.h) ────────────
-					// SDR++ NFM uses FIR filters, we approximate with IIR
+					// SDR++ NFM uses FIR filters
 					if (mode === 'nfm') {
-						// Low pass: bandwidth/2 cutoff
-						if (this.audioParams.lowPass) {
-							const cutoff = bw / 2.0;
-							const dt_lp = 1.0 / actualDemodRate;
-							const RC_lp = 1.0 / (2.0 * Math.PI * cutoff);
-							const alpha_lp = dt_lp / (RC_lp + dt_lp);
-							state.lpPrev = alpha_lp * demodSample + (1 - alpha_lp) * state.lpPrev;
-							demodSample = state.lpPrev;
-						}
-						// High pass: 300Hz cutoff (SDR++ uses 300Hz for voice high pass)
-						if (this.audioParams.highPass) {
-							const dt_hp = 1.0 / actualDemodRate;
-							const RC_hp = 1.0 / (2.0 * Math.PI * 300.0);
-							const alpha_hp = RC_hp / (RC_hp + dt_hp);
-							const out_hp = alpha_hp * (state.hpPrev + demodSample - state.hpPrevIn);
-							state.hpPrevIn = demodSample;
-							state.hpPrev = out_hp;
-							demodSample = out_hp;
-						}
+						demodSample = state.nfmFir.processOne(demodSample);
 					}
 
 					// ── WFM Low Pass Filter (SDR++ broadcast_fm.h) ───────

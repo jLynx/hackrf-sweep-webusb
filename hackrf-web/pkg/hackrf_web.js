@@ -67,36 +67,36 @@ export class FFT {
         wasm.__wbg_fft_free(ptr, 0);
     }
     /**
-     * HackRF One の IQ サンプル列に対して複素 FFT を実行し、
-     * スペクトログラムのウォーターフォール表示に必要な前処理を全て行う。
+     * Perform a complex FFT on HackRF One IQ samples and apply all
+     * preprocessing needed for spectrogram waterfall display.
      *
-     * このメソッドは以下の処理をワンパスで実行する：
-     * 1. IQ サンプルの正規化（i8 → f32）
-     * 2. 窓関数の適用
-     * 3. 複素 FFT
-     * 4. DC 中心配置への周波数軸の並べ替え
-     * 5. 指数移動平均によるスムージング（設定時）
-     * 6. dB スケールへの変換
+     * This method performs the following operations in a single pass:
+     * 1. Normalize IQ samples (i8 → f32)
+     * 2. Apply window function
+     * 3. Complex FFT
+     * 4. Rearrange frequency axis to DC-centered layout
+     * 5. Exponential moving average smoothing (when configured)
+     * 6. Convert to dB scale
      *
-     * 出力された配列は、そのままスペクトログラムの1行（時刻 t におけるスペクトル）として
-     * ウォーターフォール表示に使用できる。
+     * The output array can be used directly as a single row (spectrum at time t)
+     * in a waterfall spectrogram display.
      *
-     * # 入力形式
-     * * `input_` - i8の配列として表現された複素数列 `[re0, im0, re1, im1, ...]`
-     *               長さは `self.n * 2` でなければならない
+     * # Input format
+     * * `input_` - Complex sequence as i8 array `[re0, im0, re1, im1, ...]`
+     *               Length must be `self.n * 2`
      *
-     * # 出力形式
-     * * `result` - 結果を格納するバッファ。長さは `self.n` でなければならない
-     *   - `result[0 .. half_n]` - 負の周波数成分（DC中心配置、dBスケール）
-     *   - `result[half_n .. n]` - 正の周波数成分（DC中心配置、dBスケール）
+     * # Output format
+     * * `result` - Buffer to store results. Length must be `self.n`
+     *   - `result[0 .. half_n]` - Negative frequency components (DC-centered, dB scale)
+     *   - `result[half_n .. n]` - Positive frequency components (DC-centered, dB scale)
      *
-     * # コントラクト（呼び出し側の責任）
-     * * `input_.len() == self.n * 2` でなければならない
-     * * `result.len() == self.n` でなければならない
+     * # Contract (caller's responsibility)
+     * * `input_.len() == self.n * 2` must hold
+     * * `result.len() == self.n` must hold
      *
-     * # 安全性
-     * この関数は unsafe なメモリ再解釈を使用する。コントラクトに違反する場合、
-     * 未定義動作を引き起こす可能性がある。
+     * # Safety
+     * This function uses unsafe memory reinterpretation. Violating the contract
+     * may cause undefined behavior.
      * @param {Int8Array} input_
      * @param {Float32Array} result
      */
@@ -108,16 +108,16 @@ export class FFT {
         wasm.fft_fft(this.__wbg_ptr, ptr0, len0, ptr1, len1, result);
     }
     /**
-     * 新しいFFTプロセッサを作成する。
+     * Create a new FFT processor.
      *
-     * # 引数
-     * * `n` - FFTサイズ。2の累乗であり、0より大きい必要がある
-     * * `window_` - 窓関数の配列。長さは `n` と等しくなければならない
+     * # Arguments
+     * * `n` - FFT size. Must be a power of two and greater than 0
+     * * `window_` - Window function array. Length must equal `n`
      *
-     * # パニック
-     * * `n` が 0 の場合
-     * * `n` が 2の累乗でない場合
-     * * `window_.len() != n` の場合
+     * # Panics
+     * * If `n` is 0
+     * * If `n` is not a power of two
+     * * If `window_.len() != n`
      * @param {number} n
      * @param {Float32Array} window_
      */
@@ -132,8 +132,8 @@ export class FFT {
     /**
      * @param {number} val
      */
-    set_smoothing_time_constant(val) {
-        wasm.fft_set_smoothing_time_constant(this.__wbg_ptr, val);
+    set_smoothing_speed(val) {
+        wasm.fft_set_smoothing_speed(this.__wbg_ptr, val);
     }
 }
 if (Symbol.dispose) FFT.prototype[Symbol.dispose] = FFT.prototype.free;
