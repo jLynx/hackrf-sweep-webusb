@@ -28,6 +28,12 @@ export class DspProcessor {
      */
     process_iq_only(input: Int8Array, output: Float32Array): number;
     /**
+     * Reset all DSP state (filter histories, demod phase, resampler state).
+     * Call this when switching demodulation modes or when the signal chain
+     * changes to avoid stale state causing audio artifacts.
+     */
+    reset(): void;
+    /**
      * Update the channel bandwidth and rebuild filters.
      */
     set_bandwidth(bandwidth: number): void;
@@ -104,6 +110,7 @@ export interface InitOutput {
     readonly dspprocessor_new: (a: number, b: number, c: number) => number;
     readonly dspprocessor_process: (a: number, b: number, c: number, d: number, e: number, f: any) => number;
     readonly dspprocessor_process_iq_only: (a: number, b: number, c: number, d: number, e: number, f: any) => number;
+    readonly dspprocessor_reset: (a: number) => void;
     readonly dspprocessor_set_bandwidth: (a: number, b: number) => void;
     readonly dspprocessor_set_shift: (a: number, b: number, c: number) => void;
     readonly dspprocessor_set_squelch: (a: number, b: number, c: number) => void;

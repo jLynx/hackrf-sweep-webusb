@@ -360,6 +360,8 @@ class Worker {
 			lastBandwidth: initialBandwidth,
 			// FM output gain (RMS-based AGC)
 			outputGain: 0,
+			// Track last mode to detect mode switches
+			lastMode: '',
 		};
 
 		await hackrf.startRx((data) => {
@@ -392,6 +394,17 @@ class Worker {
 
 				const mode = this.audioParams.mode;
 				const bw = this.audioParams.bandwidth || 150000;
+
+				// Detect mode switch → reset all DSP and JS audio state
+				if (mode !== state.lastMode) {
+					state.lastMode = mode;
+					state.outputGain = 0;
+					state.deemphPrev = 0;
+					state.dcAvg = 0;
+					state.agcGain = 1.0;
+					state.ssbPhase = 0;
+					this.ddc.reset();
+				}
 
 				// Update bandwidth in Rust if changed
 				if (bw !== state.lastBandwidth) {
@@ -435,14 +448,22 @@ class Worker {
 					}
 
 					// ── Output level normalization (RMS-based AGC) ────────────
+					// Capped at reasonable max gain to prevent blast on squelch unmute
 					let rms = 0;
 					for (let i = 0; i < result.length; i++) rms += result[i] * result[i];
 					rms = Math.sqrt(rms / result.length);
 					const targetRMS = 0.15;
-					const desiredGain = rms > 1e-6 ? targetRMS / rms : 1000;
-					const clampedGain = Math.min(desiredGain, 5000);
+					const desiredGain = rms > 1e-6 ? targetRMS / rms : 50;
+					const clampedGain = Math.min(desiredGain, 50);
 					if (!state.outputGain) state.outputGain = clampedGain;
-					state.outputGain = state.outputGain * 0.95 + clampedGain * 0.05;
+					// Faster attack (cap gain quickly), slower decay (raise gain slowly)
+					if (clampedGain < state.outputGain) {
+						// Signal got louder → reduce gain fast to avoid clipping
+						state.outputGain = state.outputGain * 0.7 + clampedGain * 0.3;
+					} else {
+						// Signal got quieter → raise gain slowly
+						state.outputGain = state.outputGain * 0.95 + clampedGain * 0.05;
+					}
 					for (let i = 0; i < result.length; i++) {
 						result[i] *= state.outputGain;
 						if (result[i] > 1.0) result[i] = 1.0;

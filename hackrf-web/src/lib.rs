@@ -753,6 +753,26 @@ impl DspProcessor {
         self.squelch_enabled = enabled;
     }
 
+    /// Reset all DSP state (filter histories, demod phase, resampler state).
+    /// Call this when switching demodulation modes or when the signal chain
+    /// changes to avoid stale state causing audio artifacts.
+    pub fn reset(&mut self) {
+        // Reset FM demod state
+        self.prev_phase = 0.0;
+
+        // Reset NCO phasor (keep frequency, reset phase accumulation)
+        self.phasor_re = 1.0;
+        self.phasor_im = 0.0;
+
+        // Reset filter histories
+        self.channel_filter.reset();
+        self.post_demod_fir.reset();
+
+        // Reset resamplers
+        self.iq_resampler.reset();
+        self.audio_resampler.reset();
+    }
+
     /// Process raw i8 IQ samples through the full SDR++ NFM pipeline.
     /// Returns the number of f32 audio samples written to `output`.
     ///

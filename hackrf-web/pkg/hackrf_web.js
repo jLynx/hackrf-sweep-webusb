@@ -63,6 +63,14 @@ export class DspProcessor {
         return ret >>> 0;
     }
     /**
+     * Reset all DSP state (filter histories, demod phase, resampler state).
+     * Call this when switching demodulation modes or when the signal chain
+     * changes to avoid stale state causing audio artifacts.
+     */
+    reset() {
+        wasm.dspprocessor_reset(this.__wbg_ptr);
+    }
+    /**
      * Update the channel bandwidth and rebuild filters.
      * @param {number} bandwidth
      */
