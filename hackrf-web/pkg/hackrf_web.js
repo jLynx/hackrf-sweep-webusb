@@ -12,21 +12,28 @@ export class DspProcessor {
         wasm.__wbg_dspprocessor_free(ptr, 0);
     }
     /**
-     * @param {number} sample_rate
+     * Create a new DSP processor matching SDR++ NFM pipeline.
+     *
+     * # Arguments
+     * * `in_sample_rate` - Source sample rate (e.g. 2_000_000.0 for 2 MHz)
+     * * `shift_hz` - Frequency offset in Hz (VFO offset from center)
+     * * `bandwidth` - Channel bandwidth in Hz (default 12500.0 for NFM)
+     * @param {number} in_sample_rate
      * @param {number} shift_hz
-     * @param {number} decimation
+     * @param {number} bandwidth
      */
-    constructor(sample_rate, shift_hz, decimation) {
-        const ret = wasm.dspprocessor_new(sample_rate, shift_hz, decimation);
+    constructor(in_sample_rate, shift_hz, bandwidth) {
+        const ret = wasm.dspprocessor_new(in_sample_rate, shift_hz, bandwidth);
         this.__wbg_ptr = ret >>> 0;
         DspProcessorFinalization.register(this, this.__wbg_ptr, this);
         return this;
     }
     /**
-     * Process raw i8 IQ samples, applying NCO shift and CIC decimation.
-     * Returns the number of f32 samples written to `output`.
-     * `input` is pairs of i8 (I, Q).
-     * `output` is pairs of f32 (I, Q) and must be large enough. (input.len() / decimation)
+     * Process raw i8 IQ samples through the full SDR++ NFM pipeline.
+     * Returns the number of f32 audio samples written to `output`.
+     *
+     * Input: i8 IQ pairs [I0, Q0, I1, Q1, ...]
+     * Output: f32 mono audio at 48 kHz
      * @param {Int8Array} input
      * @param {Float32Array} output
      * @returns {number}
@@ -40,17 +47,43 @@ export class DspProcessor {
         return ret >>> 0;
     }
     /**
-     * @param {number} decimation
+     * Process raw i8 IQ samples through NCO + decimation only.
+     * Returns interleaved complex f32 IQ pairs at IF sample rate (50 kHz).
+     * Used for non-FM modes (AM, SSB, CW, RAW) where JS handles demodulation.
+     * @param {Int8Array} input
+     * @param {Float32Array} output
+     * @returns {number}
      */
-    set_decimation(decimation) {
-        wasm.dspprocessor_set_decimation(this.__wbg_ptr, decimation);
+    process_iq_only(input, output) {
+        const ptr0 = passArray8ToWasm0(input, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        var ptr1 = passArrayF32ToWasm0(output, wasm.__wbindgen_malloc);
+        var len1 = WASM_VECTOR_LEN;
+        const ret = wasm.dspprocessor_process_iq_only(this.__wbg_ptr, ptr0, len0, ptr1, len1, output);
+        return ret >>> 0;
     }
     /**
+     * Update the channel bandwidth and rebuild filters.
+     * @param {number} bandwidth
+     */
+    set_bandwidth(bandwidth) {
+        wasm.dspprocessor_set_bandwidth(this.__wbg_ptr, bandwidth);
+    }
+    /**
+     * Update the NCO frequency offset.
      * @param {number} sample_rate
      * @param {number} shift_hz
      */
     set_shift(sample_rate, shift_hz) {
         wasm.dspprocessor_set_shift(this.__wbg_ptr, sample_rate, shift_hz);
+    }
+    /**
+     * Set squelch level in dB. Set to -200 or below to effectively disable.
+     * @param {number} level
+     * @param {boolean} enabled
+     */
+    set_squelch(level, enabled) {
+        wasm.dspprocessor_set_squelch(this.__wbg_ptr, level, enabled);
     }
 }
 if (Symbol.dispose) DspProcessor.prototype[Symbol.dispose] = DspProcessor.prototype.free;

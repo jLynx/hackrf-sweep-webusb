@@ -4,16 +4,41 @@
 export class DspProcessor {
     free(): void;
     [Symbol.dispose](): void;
-    constructor(sample_rate: number, shift_hz: number, decimation: number);
     /**
-     * Process raw i8 IQ samples, applying NCO shift and CIC decimation.
-     * Returns the number of f32 samples written to `output`.
-     * `input` is pairs of i8 (I, Q).
-     * `output` is pairs of f32 (I, Q) and must be large enough. (input.len() / decimation)
+     * Create a new DSP processor matching SDR++ NFM pipeline.
+     *
+     * # Arguments
+     * * `in_sample_rate` - Source sample rate (e.g. 2_000_000.0 for 2 MHz)
+     * * `shift_hz` - Frequency offset in Hz (VFO offset from center)
+     * * `bandwidth` - Channel bandwidth in Hz (default 12500.0 for NFM)
+     */
+    constructor(in_sample_rate: number, shift_hz: number, bandwidth: number);
+    /**
+     * Process raw i8 IQ samples through the full SDR++ NFM pipeline.
+     * Returns the number of f32 audio samples written to `output`.
+     *
+     * Input: i8 IQ pairs [I0, Q0, I1, Q1, ...]
+     * Output: f32 mono audio at 48 kHz
      */
     process(input: Int8Array, output: Float32Array): number;
-    set_decimation(decimation: number): void;
+    /**
+     * Process raw i8 IQ samples through NCO + decimation only.
+     * Returns interleaved complex f32 IQ pairs at IF sample rate (50 kHz).
+     * Used for non-FM modes (AM, SSB, CW, RAW) where JS handles demodulation.
+     */
+    process_iq_only(input: Int8Array, output: Float32Array): number;
+    /**
+     * Update the channel bandwidth and rebuild filters.
+     */
+    set_bandwidth(bandwidth: number): void;
+    /**
+     * Update the NCO frequency offset.
+     */
     set_shift(sample_rate: number, shift_hz: number): void;
+    /**
+     * Set squelch level in dB. Set to -200 or below to effectively disable.
+     */
+    set_squelch(level: number, enabled: boolean): void;
 }
 
 export class FFT {
@@ -78,8 +103,10 @@ export interface InitOutput {
     readonly __wbg_fft_free: (a: number, b: number) => void;
     readonly dspprocessor_new: (a: number, b: number, c: number) => number;
     readonly dspprocessor_process: (a: number, b: number, c: number, d: number, e: number, f: any) => number;
-    readonly dspprocessor_set_decimation: (a: number, b: number) => void;
+    readonly dspprocessor_process_iq_only: (a: number, b: number, c: number, d: number, e: number, f: any) => number;
+    readonly dspprocessor_set_bandwidth: (a: number, b: number) => void;
     readonly dspprocessor_set_shift: (a: number, b: number, c: number) => void;
+    readonly dspprocessor_set_squelch: (a: number, b: number, c: number) => void;
     readonly fft_fft: (a: number, b: number, c: number, d: number, e: number, f: any) => void;
     readonly fft_new: (a: number, b: number, c: number) => number;
     readonly fft_set_smoothing_speed: (a: number, b: number) => void;

@@ -295,6 +295,10 @@ createApp({
 				this.gainNode.gain.value = this.audio.volume / 100;
 				this.gainNode.connect(this.audioCtx.destination);
 				this.nextPlayTime = 0;
+				// Ring buffer to accumulate small audio chunks before scheduling
+				// Prevents gaps caused by scheduling many tiny buffers
+				this.audioRingBuf = new Float32Array(4800); // 100ms at 48kHz
+				this.audioRingPos = 0;
 			}
 			this.updateBackendAudioParams();
 		},
@@ -312,6 +316,25 @@ createApp({
 
 			if (!floats.length) return;
 
+			// Accumulate into ring buffer, schedule when we have enough
+			// This batches tiny chunks (~786 samples) into larger buffers
+			// to prevent scheduling gaps on the main thread
+			const SCHEDULE_THRESHOLD = 2400; // 50ms at 48kHz — schedule when we have this many
+			let srcOffset = 0;
+			while (srcOffset < floats.length) {
+				const space = this.audioRingBuf.length - this.audioRingPos;
+				const toCopy = Math.min(space, floats.length - srcOffset);
+				this.audioRingBuf.set(floats.subarray(srcOffset, srcOffset + toCopy), this.audioRingPos);
+				this.audioRingPos += toCopy;
+				srcOffset += toCopy;
+
+				if (this.audioRingPos >= SCHEDULE_THRESHOLD) {
+					this._scheduleAudioChunk(this.audioRingBuf.slice(0, this.audioRingPos));
+					this.audioRingPos = 0;
+				}
+			}
+		},
+		_scheduleAudioChunk(floats) {
 			const buffer = this.audioCtx.createBuffer(1, floats.length, 48000);
 			buffer.getChannelData(0).set(floats);
 
@@ -319,8 +342,10 @@ createApp({
 			src.buffer = buffer;
 			src.connect(this.gainNode);
 
-			if (this.nextPlayTime < this.audioCtx.currentTime) {
-				this.nextPlayTime = this.audioCtx.currentTime + 0.05;
+			const now = this.audioCtx.currentTime;
+			if (this.nextPlayTime < now) {
+				// Fallen behind — reschedule with minimal gap
+				this.nextPlayTime = now + 0.01;
 			}
 			src.start(this.nextPlayTime);
 			this.nextPlayTime += buffer.duration;
