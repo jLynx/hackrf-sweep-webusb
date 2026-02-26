@@ -4,11 +4,11 @@ Copyright (c) 2019, cho45 <cho45@lowreal.net>
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
-    Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
-    Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the
-    documentation and/or other materials provided with the distribution.
-    Neither the name of Great Scott Gadgets nor the names of its contributors may be used to endorse or promote products derived from this software
-    without specific prior written permission.
+	Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+	Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the
+	documentation and/or other materials provided with the distribution.
+	Neither the name of Great Scott Gadgets nor the names of its contributors may be used to endorse or promote products derived from this software
+	without specific prior written permission.
 
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
 THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
@@ -18,55 +18,55 @@ HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABI
 ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-export function convertDecibelToRGB (dB) {
+export function convertDecibelToRGB(dB) {
 	var r = 0, g = 0, b = 0;
 	var p = (dB + 48) / 48;
 
 	switch (true) {
-	case p > 5.0/6.0:
-		// yellow -> red
-		p = (p - (5 / 6.0)) / (1 / 6.0);
-		r = 255;
-		g = 255 * p;
-		b = 255 * p;
-		break;
-	case p > 4.0/6.0:
-		// yellow -> red
-		p = (p - (4 / 6.0)) / (1 / 6.0);
-		r = 255;
-		g = 255 * (1 - p);
-		b = 0;
-		break;
-	case p > 3.0/6.0:
-		// green -> yellow
-		p = (p - (3 / 6.0)) / (1 / 6.0);
-		r = 255 * p;
-		g = 255;
-		b = 0;
-		break;
-	case p > 2.0/6.0:
-		// light blue -> green
-		p = (p - (2 / 6.0)) / (1 / 6.0);
-		r = 0;
-		g = 255;
-		b = 255 * (1 - p);
-		break;
-	case p > 1.0/6.0:
-		// blue -> light blue
-		p = (p - (1 / 6.0)) / (1 / 6.0);
-		r = 0;
-		g = 255 * p;
-		b = 255;
-		break;
-	case p > 0:
-		// black -> blue
-		p = p / (1 / 6.0);
-		r = 0;
-		g = 0;
-		b = 255 * p;
+		case p > 5.0 / 6.0:
+			// yellow -> red
+			p = (p - (5 / 6.0)) / (1 / 6.0);
+			r = 255;
+			g = 255 * p;
+			b = 255 * p;
+			break;
+		case p > 4.0 / 6.0:
+			// yellow -> red
+			p = (p - (4 / 6.0)) / (1 / 6.0);
+			r = 255;
+			g = 255 * (1 - p);
+			b = 0;
+			break;
+		case p > 3.0 / 6.0:
+			// green -> yellow
+			p = (p - (3 / 6.0)) / (1 / 6.0);
+			r = 255 * p;
+			g = 255;
+			b = 0;
+			break;
+		case p > 2.0 / 6.0:
+			// light blue -> green
+			p = (p - (2 / 6.0)) / (1 / 6.0);
+			r = 0;
+			g = 255;
+			b = 255 * (1 - p);
+			break;
+		case p > 1.0 / 6.0:
+			// blue -> light blue
+			p = (p - (1 / 6.0)) / (1 / 6.0);
+			r = 0;
+			g = 255 * p;
+			b = 255;
+			break;
+		case p > 0:
+			// black -> blue
+			p = p / (1 / 6.0);
+			r = 0;
+			g = 0;
+			b = 255 * p;
 	}
 
-	return { r: r, g: g, b : b };
+	return { r: r, g: g, b: b };
 }
 
 
@@ -105,7 +105,7 @@ export class WaterfallGL {
 	initWebGL() {
 		this._current = 0;
 
-		this.canvas.width  = this.bandSize;
+		this.canvas.width = this.bandSize;
 		this.canvas.height = this.historySize;
 
 		try {
@@ -138,9 +138,24 @@ export class WaterfallGL {
 			uniform sampler2D uTexture1;
 			uniform highp vec2 uViewCoords;
 			uniform highp float uOffsetY;
+			uniform highp float uZoomOffset;
+			uniform highp float uZoomScale;
 
 			void main(void) {
 				highp vec4 screen = gl_FragCoord;
+				
+				// Apply horizontal zoom
+				highp float normalizedX = screen.x / uViewCoords.x;
+				highp float zoomedX = (normalizedX / uZoomScale) + uZoomOffset;
+				
+				if (zoomedX < 0.0 || zoomedX > 1.0) {
+					gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+					return;
+				}
+				
+				// Re-map actual screen X coordinate back for texture lookup
+				screen.x = zoomedX * uViewCoords.x;
+
 				if (screen.y >= uOffsetY) {
 					// 上半分: 古いデータ（uTexture1）を表示
 					// 下から uOffsetY 分だけスクロールして表示
@@ -193,9 +208,9 @@ export class WaterfallGL {
 		this.vertices1 = gl.createBuffer();
 		gl.bindBuffer(gl.ARRAY_BUFFER, this.vertices1);
 		gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
-			1.0,  1.0,  0.0,
-			-1.0, 1.0,  0.0,
-			1.0,  -1.0, 0.0,
+			1.0, 1.0, 0.0,
+			-1.0, 1.0, 0.0,
+			1.0, -1.0, 0.0,
 			-1.0, -1.0, 0.0
 		]), gl.STATIC_DRAW);
 
@@ -204,8 +219,8 @@ export class WaterfallGL {
 
 		// 2の累乗サイズに切り上げてテクスチャを初期化
 		// （古いWebGLの制約への対応。NPOT非対応環境でも動作させる）
-		this.canvas.width  = Math.pow(2, Math.ceil(Math.log2(this.bandSize)));
-		console.log({glInit: this.canvas.width});
+		this.canvas.width = Math.pow(2, Math.ceil(Math.log2(this.bandSize)));
+		console.log({ glInit: this.canvas.width });
 		this.canvas.height = this.historySize;
 		console.log(this.canvas.width, this.bandSize);
 
@@ -221,6 +236,12 @@ export class WaterfallGL {
 
 		gl.uniform2f(gl.getUniformLocation(this.shaderProgram, 'uViewCoords'), this.canvas.width, this.canvas.height);
 
+		// Initial zoom uniforms
+		this.uZoomOffsetLocation = gl.getUniformLocation(this.shaderProgram, 'uZoomOffset');
+		this.uZoomScaleLocation = gl.getUniformLocation(this.shaderProgram, 'uZoomScale');
+		gl.uniform1f(this.uZoomOffsetLocation, 0.0);
+		gl.uniform1f(this.uZoomScaleLocation, 1.0);
+
 		gl.bindBuffer(gl.ARRAY_BUFFER, this.vertices1);
 		gl.vertexAttribPointer(this.vertexPositionAttribute, 3, gl.FLOAT, false, 0, 0);
 
@@ -234,10 +255,16 @@ export class WaterfallGL {
 
 		gl.bindTexture(gl.TEXTURE_2D, this.textures[0]);
 
-		this.canvas.width  = this.bandSize;
+		this.canvas.width = this.bandSize;
 		this.canvas.height = this.historySize;
 
 		this.render();
+	}
+
+	setZoom(offset, scale) {
+		const gl = this.gl;
+		gl.uniform1f(this.uZoomOffsetLocation, offset);
+		gl.uniform1f(this.uZoomScaleLocation, scale);
 	}
 
 	render() {
@@ -293,25 +320,40 @@ export class Waterfall {
 		this.historySize = historySize;
 		this.canvas = canvas;
 		this.data = new Uint8Array(this.bandSize * 4);
-		this.canvas.width  = this.bandSize;
+		this.canvas.width = this.bandSize;
 		this.canvas.height = this.historySize;
 		this.ctx = this.canvas.getContext('2d');
+		this.ctx.imageSmoothingEnabled = false;
+
+		// internal buffer for drawing full width
+		this.offscreen = document.createElement('canvas');
+		this.offscreen.width = this.bandSize;
+		this.offscreen.height = this.historySize;
+		this.offCtx = this.offscreen.getContext('2d');
+
+		this.zoomOffset = 0.0;
+		this.zoomScale = 1.0;
+	}
+
+	setZoom(offset, scale) {
+		this.zoomOffset = offset;
+		this.zoomScale = scale;
 	}
 
 	renderLine(array) {
-		const { canvas, ctx } = this;
+		const { canvas, ctx, offCtx, offscreen } = this;
 
-		// shift data to up
-		ctx.drawImage(
-			canvas,
-			0, 1, canvas.width, canvas.height - 1,
-			0, 0, canvas.width, canvas.height - 1
+		// shift data to up on offscreen
+		offCtx.drawImage(
+			offscreen,
+			0, 1, offscreen.width, offscreen.height - 1,
+			0, 0, offscreen.width, offscreen.height - 1
 		);
 
-		var imageData = ctx.getImageData(0, canvas.height, canvas.width, 1);
+		var imageData = offCtx.getImageData(0, offscreen.height - 1, offscreen.width, 1);
 		var data = imageData.data; // rgba
 
-		for (var i = 0, len = canvas.width; i < len; i++) {
+		for (var i = 0, len = offscreen.width; i < len; i++) {
 			var n = i * 4;
 			var rgb = convertDecibelToRGB(array[i]);
 
@@ -321,6 +363,18 @@ export class Waterfall {
 			data[n + 3] = 255;
 		}
 
-		ctx.putImageData(imageData, 0, canvas.height-1);
+		offCtx.putImageData(imageData, 0, offscreen.height - 1);
+
+		// Now draw from offscreen to main canvas with zoom applied
+		ctx.fillStyle = 'black';
+		ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+		const sourceX = this.zoomOffset * offscreen.width;
+		const sourceWidth = offscreen.width / this.zoomScale;
+
+		ctx.drawImage(offscreen,
+			sourceX, 0, sourceWidth, offscreen.height,
+			0, 0, canvas.width, canvas.height
+		);
 	}
 }

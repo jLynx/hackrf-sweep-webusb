@@ -30,15 +30,23 @@ createApp({
 			},
 			info: { boardName: "" },
 			hoverFreqText: "",
+			view: {
+				zoomScale: 1.0,
+				zoomOffset: 0.0 // 0 to 1-1/scale
+			}
 		};
 	},
 	computed: {
-		// Calculate the min/max display bandwidth based on sampleRate
+		// Calculate the min/max display bandwidth based on sampleRate AND zoom state
 		minFreq() {
-			return this.radio.centerFreq - (this.radio.sampleRate / 2) / 1e6;
+			const baseMin = this.radio.centerFreq - (this.radio.sampleRate / 2) / 1e6;
+			const baseSpan = this.radio.sampleRate / 1e6;
+			return baseMin + (baseSpan * this.view.zoomOffset);
 		},
 		maxFreq() {
-			return this.radio.centerFreq + (this.radio.sampleRate / 2) / 1e6;
+			const baseMin = this.radio.centerFreq - (this.radio.sampleRate / 2) / 1e6;
+			const baseSpan = this.radio.sampleRate / 1e6;
+			return baseMin + (baseSpan * (this.view.zoomOffset + (1.0 / this.view.zoomScale)));
 		}
 	},
 	methods: {
@@ -176,14 +184,22 @@ createApp({
 			ctx.save();
 			ctx.beginPath();
 			ctx.moveTo(0, h);
-			for (let i = 0; i < data.length; i++) {
+
+			const pointsToDraw = data.length / this.view.zoomScale;
+			const startIdx = Math.floor(data.length * this.view.zoomOffset);
+
+			for (let i = 0; i < pointsToDraw; i++) {
+				const dataIdx = startIdx + i;
+				if (dataIdx >= data.length) break;
 				// data[i] is rough dB, from -120 to -20 mostly, adapt visual scale
 				// e.g. -110 is bottom, -10 is top
-				const n = (data[i] + 110) / 100;
+				const n = (data[dataIdx] + 110) / 100;
 				let y = h - (h * n);
 				if (y < 0) y = 0;
 				if (y > h) y = h;
-				ctx.lineTo(i, y);
+
+				const x = (i / pointsToDraw) * w;
+				ctx.lineTo(x, y);
 			}
 			ctx.strokeStyle = "#4da6ff";
 			ctx.lineWidth = 1;
@@ -199,10 +215,16 @@ createApp({
 			// Draw VFO highlight
 			if (this.audio.freq !== null && this.audio.enabled) {
 				const bandwidthHz = this.audio.mode === 'wbfm' ? 150000 : (this.audio.mode === 'nbfm' ? 15000 : 10000);
-				const pixelWidth = (bandwidthHz / this.radio.sampleRate) * w;
+
+				const currentSpanHz = this.radio.sampleRate / this.view.zoomScale;
+				const pixelWidth = (bandwidthHz / currentSpanHz) * w;
 
 				const offsetFreq = (this.audio.freq - this.radio.centerFreq) * 1e6;
-				const centerPixel = (offsetFreq / this.radio.sampleRate) * w + (w / 2);
+				const basePixel = (offsetFreq / this.radio.sampleRate) * w + (w / 2);
+
+				// Adjust for zoom
+				const zoomedPixelOffset = basePixel - (this.view.zoomOffset * w);
+				const centerPixel = zoomedPixelOffset * this.view.zoomScale;
 
 				// Red tint block
 				ctx.fillStyle = "rgba(255, 68, 68, 0.25)";
@@ -269,7 +291,7 @@ createApp({
 			}
 		},
 		saveSetting() {
-			const json = JSON.stringify({ radio: this.radio, gains: this.gains, audio: this.audio });
+			const json = JSON.stringify({ radio: this.radio, gains: this.gains, audio: this.audio, view: this.view });
 			localStorage.setItem('sdr-web-setting', json);
 		},
 		loadSetting() {
@@ -280,9 +302,42 @@ createApp({
 					if (setting.radio) Object.assign(this.radio, setting.radio);
 					if (setting.gains) Object.assign(this.gains, setting.gains);
 					if (setting.audio) Object.assign(this.audio, setting.audio);
+					if (setting.view) Object.assign(this.view, setting.view);
 					this.audio.enabled = false; // ensure audio is physically off on load
 				}
 			} catch (e) { }
+		},
+		applyZoomToEngine() {
+			if (this.waterfallEngine) {
+				this.waterfallEngine.setZoom(this.view.zoomOffset, this.view.zoomScale);
+			}
+		},
+		handleWheelZoom(e, rect) {
+			e.preventDefault();
+
+			const zoomSensitivity = 0.1;
+			const zoomDir = e.deltaY < 0 ? 1 : -1;
+			const newScale = Math.max(1.0, Math.min(100.0, this.view.zoomScale * (1 + (zoomDir * zoomSensitivity))));
+
+			// Calculate where the mouse is relative to the current view
+			const mouseX = e.clientX - rect.left;
+			const p = mouseX / rect.width;
+
+			// Calculate the absolute normalized coordinate of the mouse
+			const absNormTarget = this.view.zoomOffset + (p / this.view.zoomScale);
+
+			// Calculate new offset to keep the absolute target under the mouse
+			let newOffset = absNormTarget - (p / newScale);
+
+			// Clamp offset
+			const maxOffset = 1.0 - (1.0 / newScale);
+			if (newOffset < 0) newOffset = 0;
+			if (newOffset > maxOffset) newOffset = maxOffset;
+
+			this.view.zoomScale = newScale;
+			this.view.zoomOffset = newOffset;
+
+			this.applyZoomToEngine();
 		}
 	},
 	created: async function () {
@@ -292,6 +347,11 @@ createApp({
 
 		this.$watch('radio', async () => {
 			this.saveSetting();
+			// Reset zoom on radio change
+			this.view.zoomScale = 1.0;
+			this.view.zoomOffset = 0.0;
+			this.applyZoomToEngine();
+
 			if (this.running) {
 				await this.togglePlay();
 				await this.togglePlay();
@@ -322,40 +382,106 @@ createApp({
 			this.updateBackendAudioParams();
 			this.saveSetting();
 		}, { deep: true });
+
+		this.$watch('view', () => {
+			this.applyZoomToEngine();
+			this.saveSetting();
+		}, { deep: true });
 	},
 	mounted() {
 		// Event listeners for tuning on canvas
-		const updateHover = (e) => {
+		let isDraggingVFO = false;
+		let isPanning = false;
+		let lastPanX = 0;
+
+		const getFreqFromEvent = (e) => {
 			const rect = e.currentTarget.getBoundingClientRect();
 			const p = (e.clientX - rect.left) / rect.width;
-			const hoverFreq = this.minFreq + p * (this.maxFreq - this.minFreq);
+			return this.minFreq + p * (this.maxFreq - this.minFreq);
+		};
 
+		const updateHover = (e) => {
+			const hoverFreq = getFreqFromEvent(e);
 			this.hoverFreqText = hoverFreq.toFixed(3) + " MHz";
 
+			const rect = e.currentTarget.getBoundingClientRect();
+			const p = (e.clientX - rect.left) / rect.width;
 			const ht = this.$refs.hoverTick;
 			ht.style.display = "block";
 			ht.style.left = (p * 100) + "%";
 		};
-		const hoverListener = (e) => {
-			updateHover(e);
+
+		const handleMouseMove = (e) => {
+			if (isDraggingVFO) {
+				const f = getFreqFromEvent(e);
+				this.audio.freq = parseFloat(f.toFixed(3));
+				this.updateBackendAudioParams();
+			} else if (isPanning) {
+				const dx = e.clientX - lastPanX;
+				lastPanX = e.clientX;
+				const rect = e.currentTarget.getBoundingClientRect();
+
+				// convert pixel delta to normalized view delta
+				const pDelta = dx / rect.width;
+				// adjust offset
+				let newOffset = this.view.zoomOffset - (pDelta / this.view.zoomScale);
+
+				const maxOffset = 1.0 - (1.0 / this.view.zoomScale);
+				if (newOffset < 0) newOffset = 0;
+				if (newOffset > maxOffset) newOffset = maxOffset;
+
+				this.view.zoomOffset = newOffset;
+				this.applyZoomToEngine();
+				updateHover(e);
+			} else {
+				updateHover(e);
+			}
 		};
+
 		const leaveListener = () => {
 			this.$refs.hoverTick.style.display = "none";
-		};
-		const clickListener = (e) => {
-			const rect = e.currentTarget.getBoundingClientRect();
-			const p = (e.clientX - rect.left) / rect.width;
-			const hoverFreq = this.minFreq + p * (this.maxFreq - this.minFreq);
-			this.audio.freq = parseFloat(hoverFreq.toFixed(3));
-			this.updateBackendAudioParams();
+			isDraggingVFO = false;
+			isPanning = false;
 		};
 
-		this.$refs.fft.addEventListener('mousemove', hoverListener);
-		this.$refs.fft.addEventListener('mouseleave', leaveListener);
-		this.$refs.fft.addEventListener('click', clickListener);
+		const handleMouseDown = (e) => {
+			if (e.button === 0) {
+				// Left click: set VFO
+				isDraggingVFO = true;
+				const f = getFreqFromEvent(e);
+				this.audio.freq = parseFloat(f.toFixed(3));
+				this.updateBackendAudioParams();
+			} else if (e.button === 2) {
+				// Right click: pan
+				isPanning = true;
+				lastPanX = e.clientX;
+			}
+		};
 
-		this.$refs.waterfall.addEventListener('mousemove', hoverListener);
-		this.$refs.waterfall.addEventListener('mouseleave', leaveListener);
-		this.$refs.waterfall.addEventListener('click', clickListener);
+		const handleMouseUp = (e) => {
+			isDraggingVFO = false;
+			isPanning = false;
+		};
+
+		// Prevent context menu on right click for panning
+		const handleContextMenu = (e) => e.preventDefault();
+
+		const attachCanvasEvents = (canvas) => {
+			canvas.addEventListener('mousemove', handleMouseMove);
+			canvas.addEventListener('mouseleave', leaveListener);
+			canvas.addEventListener('mousedown', handleMouseDown);
+			canvas.addEventListener('mouseup', handleMouseUp);
+			canvas.addEventListener('contextmenu', handleContextMenu);
+			canvas.addEventListener('wheel', (e) => {
+				this.handleWheelZoom(e, e.currentTarget.getBoundingClientRect());
+				updateHover(e);
+			}, { passive: false });
+		};
+
+		attachCanvasEvents(this.$refs.fft);
+		attachCanvasEvents(this.$refs.waterfall);
+
+		// Initial application of zoom bounds
+		this.applyZoomToEngine();
 	}
 }).mount('#app');
