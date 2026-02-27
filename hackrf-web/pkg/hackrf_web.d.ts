@@ -38,6 +38,13 @@ export class DspProcessor {
      */
     set_bandwidth(bandwidth: number): void;
     /**
+     * Change the IF sample rate and rebuild the entire resampler/filter chain.
+     * SDR++ uses different IF rates per demodulator mode:
+     *   NFM: 50,000 Hz,  WFM: 250,000 Hz,  AM: 15,000 Hz,
+     *   USB/LSB/DSB: 24,000 Hz,  CW: 3,000 Hz
+     */
+    set_if_sample_rate(new_if_sr: number): void;
+    /**
      * Update the NCO frequency offset.
      */
     set_shift(sample_rate: number, shift_hz: number): void;
@@ -45,6 +52,12 @@ export class DspProcessor {
      * Set squelch level in dB. Set to -200 or below to effectively disable.
      */
     set_squelch(level: number, enabled: boolean): void;
+    /**
+     * Enable or disable WFM mode. When enabled, uses SDR++ broadcast_fm.h
+     * audio filter settings (15 kHz cutoff, 4 kHz transition) instead of
+     * the standard bandwidth/2 cutoff used for NFM and other modes.
+     */
+    set_wfm_mode(enabled: boolean): void;
 }
 
 export class FFT {
@@ -112,8 +125,10 @@ export interface InitOutput {
     readonly dspprocessor_process_iq_only: (a: number, b: number, c: number, d: number, e: number, f: any) => number;
     readonly dspprocessor_reset: (a: number) => void;
     readonly dspprocessor_set_bandwidth: (a: number, b: number) => void;
+    readonly dspprocessor_set_if_sample_rate: (a: number, b: number) => void;
     readonly dspprocessor_set_shift: (a: number, b: number, c: number) => void;
     readonly dspprocessor_set_squelch: (a: number, b: number, c: number) => void;
+    readonly dspprocessor_set_wfm_mode: (a: number, b: number) => void;
     readonly fft_fft: (a: number, b: number, c: number, d: number, e: number, f: any) => void;
     readonly fft_new: (a: number, b: number, c: number) => number;
     readonly fft_set_smoothing_speed: (a: number, b: number) => void;

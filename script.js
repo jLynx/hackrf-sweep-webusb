@@ -47,6 +47,8 @@ createApp({
 			vfoFocused: false,
 			info: { boardName: "" },
 			hoverFreqText: "",
+			dspStats: null,
+			showStats: false,
 			view: {
 				zoomScale: 1.0,
 				zoomOffset: 0.0 // 0 to 1-1/scale
@@ -134,6 +136,8 @@ createApp({
 			if (this.running) {
 				await this.backend.stopRx();
 				this.running = false;
+				if (this._statsTimer) { clearInterval(this._statsTimer); this._statsTimer = null; }
+				this.dspStats = null;
 				if (this.audioCtx) {
 					try { await this.audioCtx.close(); } catch (_) { }
 					this.audioCtx = null;
@@ -171,6 +175,13 @@ createApp({
 			}
 
 			this.running = true;
+
+			// Start DSP stats polling
+			this._statsTimer = setInterval(async () => {
+				if (this.backend && this.running) {
+					this.dspStats = await this.backend.getDspStats();
+				}
+			}, 500);
 
 			// Enable audio by default when starting stream
 			this.audio.enabled = true;

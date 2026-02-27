@@ -78,6 +78,16 @@ export class DspProcessor {
         wasm.dspprocessor_set_bandwidth(this.__wbg_ptr, bandwidth);
     }
     /**
+     * Change the IF sample rate and rebuild the entire resampler/filter chain.
+     * SDR++ uses different IF rates per demodulator mode:
+     *   NFM: 50,000 Hz,  WFM: 250,000 Hz,  AM: 15,000 Hz,
+     *   USB/LSB/DSB: 24,000 Hz,  CW: 3,000 Hz
+     * @param {number} new_if_sr
+     */
+    set_if_sample_rate(new_if_sr) {
+        wasm.dspprocessor_set_if_sample_rate(this.__wbg_ptr, new_if_sr);
+    }
+    /**
      * Update the NCO frequency offset.
      * @param {number} sample_rate
      * @param {number} shift_hz
@@ -92,6 +102,15 @@ export class DspProcessor {
      */
     set_squelch(level, enabled) {
         wasm.dspprocessor_set_squelch(this.__wbg_ptr, level, enabled);
+    }
+    /**
+     * Enable or disable WFM mode. When enabled, uses SDR++ broadcast_fm.h
+     * audio filter settings (15 kHz cutoff, 4 kHz transition) instead of
+     * the standard bandwidth/2 cutoff used for NFM and other modes.
+     * @param {boolean} enabled
+     */
+    set_wfm_mode(enabled) {
+        wasm.dspprocessor_set_wfm_mode(this.__wbg_ptr, enabled);
     }
 }
 if (Symbol.dispose) DspProcessor.prototype[Symbol.dispose] = DspProcessor.prototype.free;

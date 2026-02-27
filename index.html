@@ -22,6 +22,9 @@
 					<svg v-if="!running" viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
 					<svg v-else viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
 				</button>
+				<button class="icon-btn" @click="showStats = !showStats" :class="{ active: showStats }" title="DSP Stats">
+					<svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM9 17H7v-7h2v7zm4 0h-2V7h2v10zm4 0h-2v-4h2v4z"/></svg>
+				</button>
 			</div>
 		</div>
 
@@ -52,7 +55,7 @@
 							</div>
 						</div>
 						<div class="form-row">
-							<label>Bandwidth</label>
+							<label>Sample Rate</label>
 							<select v-model.number="radio.sampleRate">
 								<option value="2000000">2 MSPS</option>
 								<option value="4000000">4 MSPS</option>
@@ -215,6 +218,15 @@
 						<div class="tick" style="right: 0px">{{ labelFreq(1) }}</div>
 					</div>
 					<div class="hover-tick" ref="hoverTick" style="display: none">{{ hoverFreqText }}</div>
+					<!-- DSP Performance Stats Overlay -->
+					<div v-if="showStats && dspStats" class="dsp-stats-overlay">
+						<div><b>DSP Stats</b></div>
+						<div>USB: {{ dspStats.usbFps }} cb/s | Chunk: {{ dspStats.chunkSize }} B</div>
+						<div>DSP: {{ dspStats.dspAvgMs }}ms avg / {{ dspStats.dspMaxMs }}ms max</div>
+						<div>Audio: {{ dspStats.audioFps }} calls/s | {{ dspStats.audioRate }} samp/s</div>
+						<div>Msgs: {{ dspStats.msgRate }} /s | Input: {{ (dspStats.inputRate/1e6).toFixed(2) }} MSa/s</div>
+						<div>Dropped: {{ dspStats.dropped }}</div>
+					</div>
 				</div>
 				<div class="waterfall-container">
 					<canvas id="waterfall" ref="waterfall"></canvas>

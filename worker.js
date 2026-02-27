@@ -333,10 +333,21 @@ class Worker {
 		}
 		this.ddc = new DspProcessor(sampleRate, 0.0, initialBandwidth);
 
-		// Buffer for both FM audio output (mono f32 @48kHz) and IQ output (interleaved @50kHz)
-		const IF_RATE = 50000;
+		// IF sample rates per mode (matches SDR++ getIFSampleRate())
+		const IF_RATES = {
+			nfm: 50000,
+			wfm: 250000,
+			am: 15000,
+			usb: 24000,
+			lsb: 24000,
+			dsb: 24000,
+			cw: 3000,
+			raw: 48000,
+		};
 		const AUDIO_RATE = 48000;
-		const maxDdcOut = Math.ceil(131072 * IF_RATE / sampleRate) * 2 + 4096;
+		// Use the max possible IF rate (WFM 250kHz) for buffer sizing
+		const MAX_IF_RATE = 250000;
+		const maxDdcOut = Math.ceil(131072 * MAX_IF_RATE / sampleRate) * 2 + 4096;
 		const ddcOutput = new Float32Array(maxDdcOut);
 
 		// ── Audio Demodulator state (matching SDR++ radio_module.h) ───
@@ -354,19 +365,101 @@ class Worker {
 			cwTone: 700,
 			// Block count
 			chunkCount: 0,
-			// Non-FM audio resampler (50 kHz → 48 kHz, polyphase)
-			audioResampler: new RationalResampler(IF_RATE, AUDIO_RATE),
+			// Non-FM audio resampler (IF → 48 kHz, polyphase)
+			audioResampler: new RationalResampler(IF_RATES.nfm, AUDIO_RATE),
+			// Track the current IF rate
+			currentIfRate: IF_RATES.nfm,
 			// Track last bandwidth sent to Rust
 			lastBandwidth: initialBandwidth,
 			// Track last mode to detect mode switches
 			lastMode: '',
 		};
 
+		// ── DSP Performance Counters ──────────────────────────────────
+		const perf = {
+			usbCallbacks: 0,      // USB transfer callbacks received
+			audioCalls: 0,        // times audio DSP ran
+			audioSamplesOut: 0,   // total audio samples produced
+			dspTimeSum: 0,        // cumulative DSP processing time (ms)
+			dspTimeMax: 0,        // worst-case DSP time this interval
+			inputSamplesSum: 0,   // IQ samples received
+			droppedChunks: 0,     // chunks where process() returned 0
+			msgsSent: 0,          // Comlink audio messages sent to main thread
+			lastReportTime: performance.now(),
+			// Snapshot for reporting
+			report: {
+				usbFps: 0, audioFps: 0, dspAvgMs: 0, dspMaxMs: 0,
+				audioRate: 0, inputRate: 0, dropped: 0, chunkSize: 0,
+			},
+		};
+		this._perf = perf;
+
+		// Update report snapshot every 500ms
+		this._perfInterval = setInterval(() => {
+			const now = performance.now();
+			const dt = (now - perf.lastReportTime) / 1000; // seconds
+			if (dt < 0.1) return;
+			perf.report = {
+				usbFps: Math.round(perf.usbCallbacks / dt),
+				audioFps: Math.round(perf.audioCalls / dt),
+				dspAvgMs: perf.audioCalls > 0 ? (perf.dspTimeSum / perf.audioCalls).toFixed(2) : '0',
+				dspMaxMs: perf.dspTimeMax.toFixed(2),
+				audioRate: Math.round(perf.audioSamplesOut / dt),
+				inputRate: Math.round(perf.inputSamplesSum / dt),
+				dropped: perf.droppedChunks,
+				chunkSize: perf.lastChunkSize || 0,
+				msgRate: Math.round(perf.msgsSent / dt),
+			};
+			perf.usbCallbacks = 0;
+			perf.audioCalls = 0;
+			perf.audioSamplesOut = 0;
+			perf.dspTimeSum = 0;
+			perf.dspTimeMax = 0;
+			perf.inputSamplesSum = 0;
+			perf.droppedChunks = 0;
+			perf.msgsSent = 0;
+			perf.lastReportTime = now;
+		}, 500);
+
+		// ── Audio Batching Buffer ─────────────────────────────────────
+		// At high sample rates (20 MHz), USB delivers 152+ chunks/s.
+		// Each produces ~315 audio samples. Sending 152 Comlink messages/s
+		// floods the main thread. Instead, batch audio and flush at ~20/s.
+		const AUDIO_BATCH_THRESHOLD = 2400; // 50ms at 48kHz
+		let audioBatchBuf = new Float32Array(4800); // 100ms capacity
+		let audioBatchPos = 0;
+
+		const flushAudio = () => {
+			if (audioBatchPos > 0) {
+				perf.msgsSent++;
+				audioCallback(audioBatchBuf.slice(0, audioBatchPos));
+				audioBatchPos = 0;
+			}
+		};
+
+		const pushAudio = (samples) => {
+			let srcOff = 0;
+			while (srcOff < samples.length) {
+				const space = audioBatchBuf.length - audioBatchPos;
+				const toCopy = Math.min(space, samples.length - srcOff);
+				audioBatchBuf.set(samples.subarray(srcOff, srcOff + toCopy), audioBatchPos);
+				audioBatchPos += toCopy;
+				srcOff += toCopy;
+
+				if (audioBatchPos >= AUDIO_BATCH_THRESHOLD) {
+					flushAudio();
+				}
+			}
+		};
+
 		await hackrf.startRx((data) => {
 			state.chunkCount++;
+			perf.usbCallbacks++;
 
 			// 1. Waterfall / Spectrum processing
 			const signed = new Int8Array(data.buffer, data.byteOffset, data.length);
+			perf.lastChunkSize = signed.length;
+			perf.inputSamplesSum += signed.length / 2;
 			for (let i = 0; i < signed.length; i++) {
 				iqBuffer[iqBufferPos++] = signed[i];
 				if (iqBufferPos >= iqBuffer.length) {
@@ -393,14 +486,29 @@ class Worker {
 				const mode = this.audioParams.mode;
 				const bw = this.audioParams.bandwidth || 150000;
 
-				// Detect mode switch → reset all DSP and JS audio state
+				// Detect mode switch → reconfigure IF rate & reset all DSP state
 				if (mode !== state.lastMode) {
 					state.lastMode = mode;
 					state.deemphPrev = 0;
 					state.dcAvg = 0;
 					state.agcGain = 1.0;
 					state.ssbPhase = 0;
-					this.ddc.reset();
+
+					// Set WFM mode flag (must be before set_if_sample_rate so
+					// the post-demod filter uses correct cutoff: 15kHz for WFM,
+					// bandwidth/2 for NFM — matches SDR++ broadcast_fm.h)
+					this.ddc.set_wfm_mode(mode === 'wfm');
+
+					// Set IF sample rate per mode (matches SDR++ getIFSampleRate())
+					const newIfRate = IF_RATES[mode] || IF_RATES.nfm;
+					if (newIfRate !== state.currentIfRate) {
+						state.currentIfRate = newIfRate;
+						this.ddc.set_if_sample_rate(newIfRate);
+						// Rebuild non-FM audio resampler for new IF rate
+						state.audioResampler = new RationalResampler(newIfRate, AUDIO_RATE);
+					} else {
+						this.ddc.reset();
+					}
 				}
 
 				// Update bandwidth in Rust if changed
@@ -417,11 +525,14 @@ class Worker {
 
 				if (mode === 'wfm' || mode === 'nfm') {
 					// ── FM Path: Full pipeline in Rust (matches SDR++ exactly) ────
-					// Rust handles: NCO → IQ polyphase resampler (→50kHz) → channel FIR
-					//   → squelch → FM quadrature demod → post-demod FIR → audio resampler (→48kHz)
-					// Output: mono f32 audio at 48 kHz
+					const t0 = performance.now();
 					const numAudioSamples = this.ddc.process(signed, ddcOutput);
-					if (numAudioSamples === 0) return;
+					const elapsed = performance.now() - t0;
+					perf.audioCalls++;
+					perf.dspTimeSum += elapsed;
+					if (elapsed > perf.dspTimeMax) perf.dspTimeMax = elapsed;
+					if (numAudioSamples === 0) { perf.droppedChunks++; return; }
+					perf.audioSamplesOut += numAudioSamples;
 
 					// Copy to writable buffer (ddcOutput is reused)
 					let result = new Float32Array(ddcOutput.subarray(0, numAudioSamples));
@@ -453,7 +564,7 @@ class Worker {
 						else if (result[i] < -1.0) result[i] = -1.0;
 					}
 
-					audioCallback(result);
+					pushAudio(result);
 				} else {
 					// ── Non-FM Path: NCO + resampler + channel FIR in Rust, demod in JS ──
 					// Rust handles: NCO → IQ polyphase resampler (→50kHz) → channel FIR
@@ -475,7 +586,7 @@ class Worker {
 					if (this.audioParams.squelchEnabled && squelchDb < this.audioParams.squelchLevel) {
 						const zeros = new Float32Array(numDemodSamples);
 						const result = state.audioResampler.process(zeros);
-						if (result.length > 0) audioCallback(result);
+						if (result.length > 0) pushAudio(result);
 						return;
 					}
 
@@ -589,7 +700,7 @@ class Worker {
 						else if (result[i] < -1.0) result[i] = -1.0;
 					}
 
-					audioCallback(result);
+					pushAudio(result);
 				}
 			  } catch (e) {
 				console.error('Audio DSP error:', e.message || e);
@@ -600,6 +711,10 @@ class Worker {
 		if (ampEnabled !== undefined) await hackrf.setAmpEnable(ampEnabled);
 		if (lnaGain !== undefined) await hackrf.setLnaGain(lnaGain);
 		if (vgaGain !== undefined) await hackrf.setVgaGain(vgaGain);
+	}
+
+	getDspStats() {
+		return this._perf ? this._perf.report : null;
 	}
 
 	setAudioParams(params) {

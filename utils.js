@@ -150,18 +150,19 @@ export class WaterfallGL {
 				// Re-map actual screen X coordinate back for texture lookup
 				screen.x = zoomedX * uViewCoords.x;
 
-				if (screen.y >= uOffsetY) {
-					// 上半分: 古いデータ（uTexture1）を表示
-					// 下から uOffsetY 分だけスクロールして表示
-					screen.y = uViewCoords.y + uOffsetY - screen.y;
-					highp vec2 screenTexCoord = screen.xy / uViewCoords.xy;
-					gl_FragColor = texture2D(uTexture1, screenTexCoord);
+				// Flow direction: Newest at the top, Oldest at bottom
+				// gl_FragCoord.y goes from 0 (bottom) to uViewCoords.y (top)
+				highp float sy = screen.y;
+				highp float splitY = uViewCoords.y - uOffsetY;
+				
+				if (sy < splitY) {
+					// Bottom part: oldest data from uTexture1
+					highp float ty = uOffsetY + sy;
+					gl_FragColor = texture2D(uTexture1, vec2(screen.x / uViewCoords.x, ty / uViewCoords.y));
 				} else {
-					// 下半分: 新しいデータ（uTexture0）を表示
-					// 下から順に 0, 1, 2... と積み上がっているので反転
-					screen.y = uViewCoords.y - screen.y + uOffsetY;
-					highp vec2 screenTexCoord = screen.xy / uViewCoords.xy;
-					gl_FragColor = texture2D(uTexture0, screenTexCoord);
+					// Top part: newer data from uTexture0
+					highp float ty = sy - splitY;
+					gl_FragColor = texture2D(uTexture0, vec2(screen.x / uViewCoords.x, ty / uViewCoords.y));
 				}
 			}
 		`);
@@ -223,8 +224,8 @@ export class WaterfallGL {
 			gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
 			gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
 			gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, this.canvas);
-			gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-			gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+			gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+			gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
 			gl.bindTexture(gl.TEXTURE_2D, null);
 		}
 
@@ -317,7 +318,7 @@ export class Waterfall {
 		this.canvas.width = this.bandSize;
 		this.canvas.height = this.historySize;
 		this.ctx = this.canvas.getContext('2d');
-		this.ctx.imageSmoothingEnabled = false;
+		this.ctx.imageSmoothingEnabled = true;
 
 		this.minDB = -70;
 		this.maxDB = 0;
@@ -345,14 +346,14 @@ export class Waterfall {
 	renderLine(array) {
 		const { canvas, ctx, offCtx, offscreen } = this;
 
-		// shift data to up on offscreen
+		// shift data to down on offscreen
 		offCtx.drawImage(
 			offscreen,
-			0, 1, offscreen.width, offscreen.height - 1,
-			0, 0, offscreen.width, offscreen.height - 1
+			0, 0, offscreen.width, offscreen.height - 1,
+			0, 1, offscreen.width, offscreen.height - 1
 		);
 
-		var imageData = offCtx.getImageData(0, offscreen.height - 1, offscreen.width, 1);
+		var imageData = offCtx.getImageData(0, 0, offscreen.width, 1);
 		var data = imageData.data; // rgba
 
 		for (var i = 0, len = offscreen.width; i < len; i++) {
@@ -365,7 +366,7 @@ export class Waterfall {
 			data[n + 3] = 255;
 		}
 
-		offCtx.putImageData(imageData, 0, offscreen.height - 1);
+		offCtx.putImageData(imageData, 0, 0);
 
 		// Now draw from offscreen to main canvas with zoom applied
 		ctx.fillStyle = 'black';
